@@ -1,0 +1,69 @@
+{
+  "strategies": {
+    "UNH Call 340 12_26": {
+      "symbol": "UNH",
+      "option_type": "CALL",
+      "underlying_price": "326.80",
+      "short_strike": "345.0",
+      "short_expiry": "20251226",
+      "short_premium": "0.75",
+      "long_strike": "345.0",
+      "long_expiry": "20260123",
+      "long_premium": "6.49",
+      "broker": "IBKR",
+      "saved_at": "2025-12-21 19:56:05"
+    },
+    "UNH 251201": {
+      "symbol": "UNH",
+      "option_type": "CALL",
+      "underlying_price": "326.80",
+      "short_strike": "340",
+      "short_expiry": "20251226",
+      "short_premium": "0.46",
+      "long_strike": "345.0",
+      "long_expiry": "20260123",
+      "long_premium": "6.49",
+      "broker": "IBKR",
+      "saved_at": "2025-12-22 18:12:10"
+    },
+    "Adobe 26 01 02": {
+      "symbol": "ADBE",
+      "option_type": "PUT",
+      "underlying_price": "358.47",
+      "short_strike": "342.5",
+      "short_expiry": "20260102",
+      "short_premium": "0.96",
+      "long_strike": "340",
+      "long_expiry": "20260123",
+      "long_premium": "3.60",
+      "broker": "IBKR",
+      "saved_at": "2025-12-22 18:45:45"
+    },
+    "SPY 26 01 02": {
+      "symbol": "SPY",
+      "option_type": "PUT",
+      "underlying_price": "688.91",
+      "short_strike": "678",
+      "short_expiry": "20260102",
+      "short_premium": "0.43",
+      "long_strike": "678",
+      "long_expiry": "20260116",
+      "long_premium": "3.05",
+      "broker": "SAXO",
+      "saved_at": "2025-12-29 11:31:29"
+    },
+    "SPY 26 01 07": {
+      "symbol": "SPY",
+      "option_type": "PUT",
+      "underlying_price": "690.38",
+      "short_strike": "679",
+      "short_expiry": "20260107",
+      "short_premium": "1.38",
+      "long_strike": "679",
+      "long_expiry": "20260116",
+      "long_premium": "3.46",
+      "broker": "SAXO",
+      "saved_at": "2025-12-28 19:12:44"
+    }
+  }
+}

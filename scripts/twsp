@@ -1,0 +1,17 @@
+#!/bin/bash
+# twsp - convenience script to start the TWS Web App and open the Paper page
+# Usage: ./scripts/twsp  OR symlink it to ~/bin/twsp for global use
+
+APP_DIR="$HOME/Aplikácie/tws-webapp"
+cd "$APP_DIR" || exit 1
+
+# Prefer run-app.sh which handles background/xdg-open
+if [ -x ./run-app.sh ]; then
+    ./run-app.sh
+else
+    nohup venv/bin/python3 run.py > /tmp/tws.log 2>&1 &
+    sleep 1
+    xdg-open "http://127.0.0.1:8000/paper" 2>/dev/null || true
+fi
+
+exit 0

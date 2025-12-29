@@ -1,0 +1,14 @@
+Flask==3.0.0
+Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
+Werkzeug==3.0.1
+SQLAlchemy==2.0.23
+
+# Interactive Brokers helper
+ib_insync
+# Matematické výpočty a štatistika
+scipy
+
+# Excel export s grafmi
+openpyxl
+xlsxwriter
