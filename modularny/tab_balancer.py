@@ -857,6 +857,7 @@ def show_balancer_plot(state):
         expiry = long_info['expiry']
         T = get_time_to_expiry_years(expiry)
         low, high = series['range']
+        short_expiry = opp_info.get('expiry', '—')
 
         print(f"DEBUG: ATR={atr:.2f}, multiplier={atr_mult}, rozsah=[{low:.2f}, {high:.2f}]")
         
@@ -976,8 +977,10 @@ def show_balancer_plot(state):
         info_text = f'Max. strata: ${min(pl_total_vals):.0f}\n'
         info_text += f'Celkový náklad: ${total_cost:.2f} (${total_cost*100:.0f})\n'
         info_text += f'DTE: {int(T*365)} dní | IV: {iv:.1%}\n'
-        theta_text = (f"Theta/den: LONG {long_type} {series['theta_long']:+.2f} | "
-                      f"LONG {opp_type} {series['theta_opp']:+.2f}")
+        theta_text = (
+            f"Theta/den (short expiry {short_expiry}): LONG {long_type} {series['theta_long']:+.2f} | "
+            f"LONG {opp_type} {series['theta_opp']:+.2f}"
+        )
         info_text += f'ATR: ${atr:.2f} (rozsah: ±${atr*atr_mult:.2f})\n'
         info_text += f'{theta_text}\n\n'
         info_text += f'ZMENA P/L pri pohybe o $1:\n'
