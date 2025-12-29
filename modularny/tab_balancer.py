@@ -3,8 +3,9 @@
 Záložka: Balancer
 Balancer - vybalansovanie pozície (PL1 + PL2 = 0)
 """
+import csv
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import subprocess
 import threading
 import os
@@ -31,6 +32,21 @@ from modularny.utils import (
     black_scholes_delta_put, black_scholes_delta_call,
     get_time_to_expiry_years
 )
+
+
+def round_strike_to_tick(value, tick=0.5):
+    """Zaokrúhli strike na najbližší krok (default 0.5)."""
+    if tick <= 0:
+        return value
+    return round(value / tick) * tick
+
+
+def symmetric_strangle_strike(long_strike, underlying, opp_type):
+    """Symetricky umiestni opačný strike oproti aktuálnemu podkladu."""
+    distance = abs(long_strike - underlying)
+    if opp_type == 'CALL':
+        return underlying + distance
+    return max(0.01, underlying - distance)
 
 
 def calculate_pl_long(option_type, strike, premium_paid, underlying_price, current_option_price=None):
@@ -69,81 +85,288 @@ def calculate_pl_short(option_type, strike, premium_received, underlying_price, 
         return (premium_received - intrinsic) * 100
 
 
+def option_price(option_type, S, strike, T, r, iv):
+    """Black-Scholes cena opcie podľa typu."""
+    if option_type == 'CALL':
+        return black_scholes_call_price(S, strike, T, r, iv)
+    return black_scholes_put_price(S, strike, T, r, iv)
+
+
+def option_theta_per_day(option_type, S, strike, T, r, iv):
+    """Odhad theta rozpadu za deň pomocou rozdielu BS ceny pri T a T-1d."""
+    step = 1 / 365.0
+    if T <= step or iv <= 0 or math.isnan(T):
+        return 0.0
+    now_price = option_price(option_type, S, strike, T, r, iv)
+    later_price = option_price(option_type, S, strike, max(0.0, T - step), r, iv)
+    return (later_price - now_price) * 100
+
+
+def compute_option_thetas(long_info, opp_info, underlying, iv, r):
+    """Vráti theta per day pre obe nohy."""
+    expiry = long_info.get('expiry') or opp_info.get('expiry')
+    T = get_time_to_expiry_years(expiry) if expiry else 0.0
+    theta_long = option_theta_per_day(
+        long_info['type'], underlying, long_info['strike'], T, r, iv
+    )
+    theta_opp = option_theta_per_day(
+        opp_info['type'], underlying, opp_info['strike'], T, r, iv
+    )
+    return theta_long, theta_opp
+
+
+def evaluate_symmetry_score(candidate_strike, long_type, long_strike, long_premium,
+                            opp_type, underlying, T, r, iv, atr_range):
+    """Vyhodnotí, ako symetricky sa chová strangle pre daný strike."""
+    base_steps = max(1, int(math.ceil(atr_range)))
+    steps = min(base_steps, 40)
+    step = max(1.0, atr_range / steps)
+
+    opp_premium_base = option_price(opp_type, underlying, candidate_strike, T, r, iv)
+
+    def total_pl(S):
+        long_price = option_price(long_type, S, long_strike, T, r, iv)
+        opp_price = option_price(opp_type, S, candidate_strike, T, r, iv)
+        pl_long = calculate_pl_long(long_type, long_strike, long_premium, S, current_option_price=long_price)
+        pl_opp = calculate_pl_long(opp_type, candidate_strike, opp_premium_base, S, current_option_price=opp_price)
+        return pl_long + pl_opp
+
+    score = 0.0
+    for i in range(1, steps + 1):
+        delta = i * step
+        S_up = underlying + delta
+        S_down = max(0.01, underlying - delta)
+        pl_up = total_pl(S_up)
+        pl_down = total_pl(S_down)
+        score += abs(pl_up + pl_down)
+
+    if steps > 0:
+        score /= steps
+
+    return score
+
+
+def fine_tune_strike_by_symmetry(initial_strike, long_type, long_strike, long_premium,
+                                 opp_type, underlying, T, iv, r, atr_range):
+    """Doladí strike tak, aby bol strangle symetrickejší pri pohyboch ±ATR."""
+    base_score = evaluate_symmetry_score(initial_strike, long_type, long_strike, long_premium,
+                                         opp_type, underlying, T, r, iv, atr_range)
+    best_info = {
+        'strike': initial_strike,
+        'score': base_score,
+        'base_score': base_score,
+        'strike_diff': 0.0,
+        'range': atr_range
+    }
+
+    search_span = 4  # počet krokov smerom hore/dole
+    tick = 0.5
+
+    for offset in range(-search_span, search_span + 1):
+        if offset == 0:
+            continue
+        candidate = round_strike_to_tick(initial_strike + offset * tick)
+        if candidate <= 0:
+            continue
+        score = evaluate_symmetry_score(candidate, long_type, long_strike, long_premium,
+                                        opp_type, underlying, T, r, iv, atr_range)
+        if score < best_info['score']:
+            best_info['score'] = score
+            best_info['strike'] = candidate
+            best_info['strike_diff'] = candidate - initial_strike
+
+    return best_info
+
+
+def estimate_option_value(option_type, S, strike, premium, underlying):
+    """Priblížená trhová cena opcie podľa vzdialenosti od strike."""
+    if option_type == 'PUT':
+        if S >= strike:
+            distance = S - underlying
+            time_value_change = -0.10 * distance
+            return max(0.01, premium + time_value_change)
+        intrinsic = strike - S
+        time_value = premium if S >= underlying else premium * 0.5
+        return intrinsic + time_value
+    else:  # CALL
+        if S <= strike:
+            distance = underlying - S
+            time_value_change = -0.10 * distance
+            return max(0.01, premium + time_value_change)
+        intrinsic = S - strike
+        time_value = premium if S <= underlying else premium * 0.5
+        return intrinsic + time_value
+
+
+def compute_total_pl_for_price(long_info, opp_info, S, underlying):
+    """Spočíta celkový P/L strangle pri konkrétnej cene podkladu."""
+    long_value = estimate_option_value(
+        long_info['type'], S, long_info['strike'], long_info['premium'], underlying
+    )
+    opp_value = estimate_option_value(
+        opp_info['type'], S, opp_info['strike'], opp_info['premium'], underlying
+    )
+    pl_long = (long_value - long_info['premium']) * 100
+    pl_opp = (opp_value - opp_info['premium']) * 100
+    return round(pl_long + pl_opp, 6)
+
+
+def build_balancer_pl_series(state, n=501):
+    """Vráti grid cien/symetrie pre export/graf."""
+    if not hasattr(state, 'bal_last_analysis') or not state.bal_last_analysis:
+        return None
+
+    analysis = state.bal_last_analysis
+    long_info = analysis['long']
+    opp_info = analysis['opposite']
+    underlying = analysis['underlying']
+
+    atr_mult = 2.0
+    if hasattr(state, 'bal_plot_atr_mult_var'):
+        try:
+            atr_mult = float(state.bal_plot_atr_mult_var.get() or atr_mult)
+        except ValueError:
+            pass
+
+    atr = state.atr_7d if hasattr(state, 'atr_7d') and state.atr_7d and state.atr_7d > 0 else underlying * 0.05
+    low = max(0.01, underlying - atr * atr_mult)
+    high = underlying + atr * atr_mult
+    step = (high - low) / (n - 1) if n > 1 else 0
+
+    Ss = [low + i * step for i in range(n)]
+    pl_long_vals = []
+    pl_opp_vals = []
+    pl_total_vals = []
+
+    for S in Ss:
+        long_value = estimate_option_value(
+            long_info['type'], S, long_info['strike'], long_info['premium'], underlying
+        )
+        opp_value = estimate_option_value(
+            opp_info['type'], S, opp_info['strike'], opp_info['premium'], underlying
+        )
+        pl_long = (long_value - long_info['premium']) * 100
+        pl_opp = (opp_value - opp_info['premium']) * 100
+        pl_long_vals.append(pl_long)
+        pl_opp_vals.append(pl_opp)
+        pl_total_vals.append(pl_long + pl_opp)
+
+    iv = analysis.get('iv', 0.20)
+    r = analysis.get('r', 0.0)
+    theta_long, theta_opp = compute_option_thetas(long_info, opp_info, underlying, iv, r)
+    return {
+        'Ss': Ss,
+        'pl_long': pl_long_vals,
+        'pl_opp': pl_opp_vals,
+        'pl_total': pl_total_vals,
+        'long_info': long_info,
+        'opp_info': opp_info,
+        'underlying': underlying,
+        'atr': atr,
+        'atr_mult': atr_mult,
+        'range': (low, high),
+        'theta_long': theta_long,
+        'theta_opp': theta_opp,
+    }
+
+
 def find_balanced_strike(long_type, long_strike, long_premium, opp_type, expiry, iv, r, underlying):
-    """Nájde strike pre druhú LONG opciu v strangle pozícii
-    
-    Strangle: LONG PUT + LONG CALL (obe OTM)
-    Hľadáme strike pre druhú opciu tak, aby pozícia bola vyvážená:
-    - Rovnaká pravdepodobnosť zisku v oboch smeroch
-    - Alebo rovnaká delta (symetrická pozícia)
-    - Alebo rovnaký zisk pri pohybe o X hore/dole
-    """
+    """Nájde symetricky vyvážený strike pre druhú LONG opciu v strangle pozícii."""
     if not SCIPY_AVAILABLE:
         print("ERROR: scipy nie je dostupné", flush=True)
         return None
-    
+
     T = get_time_to_expiry_years(expiry)
-    
-    print(f"DEBUG find_balanced_strike: long_type={long_type}, long_strike={long_strike}, long_premium={long_premium}", flush=True)
+    print(f"DEBUG find_balanced_strike: long_type={long_type}, long_strike={long_strike}, "
+          f"long_premium={long_premium}", flush=True)
     print(f"DEBUG: opp_type={opp_type}, underlying={underlying}, T={T:.4f}, iv={iv}, r={r}", flush=True)
-    
-    # Stratégia: Nájdi strike kde premium je podobné ako LONG premium
-    # Pre vyvážený strangle by mali mať obe opcie podobné premium
-    
-    print(f"DEBUG: Hľadám strike pre {opp_type} s premium ~${long_premium:.2f}", flush=True)
-    
-    # Rozsah pre hľadanie
-    if opp_type == 'CALL':
-        # CALL nad underlying
-        search_range = range(int(underlying), int(underlying * 1.3), 1)
-    else:
-        # PUT pod underlying
-        search_range = range(int(underlying * 0.7), int(underlying), 1)
-    
-    best_strike = None
-    best_diff = float('inf')
-    best_premium = 0
-    
-    for test_strike in search_range:
-        try:
-            if opp_type == 'CALL':
-                test_premium = black_scholes_call_price(underlying, test_strike, T, r, iv)
-            else:
-                test_premium = black_scholes_put_price(underlying, test_strike, T, r, iv)
-            
-            # Hľadáme strike kde premium je najbližšie k long_premium
-            diff = abs(test_premium - long_premium)
-            if diff < best_diff:
-                best_diff = diff
-                best_strike = test_strike
-                best_premium = test_premium
-                
-        except Exception:
-            continue
-    
-    if not best_strike:
-        # Fallback: symetrický strike
-        distance = abs(long_strike - underlying)
-        if opp_type == 'CALL':
-            best_strike = underlying + distance
-        else:
-            best_strike = underlying - distance
-        
-        try:
-            if opp_type == 'CALL':
-                best_premium = black_scholes_call_price(underlying, best_strike, T, r, iv)
-            else:
-                best_premium = black_scholes_put_price(underlying, best_strike, T, r, iv)
-        except Exception:
-            best_premium = long_premium  # Fallback
-    
-    # Zaokrúhli strike na valídné hodnoty
-    # Opcie majú strike v celých číslach alebo v 0.5 krokoch
-    # Pre SPY: celé čísla
-    best_strike = round(best_strike)  # Zaokrúhli na celé číslo
-    
-    print(f"DEBUG: Najlepší strike (zaokrúhlený): {best_strike}, premium: ${best_premium:.2f} (diff: ${best_diff:.2f})", flush=True)
+
+    symmetric = symmetric_strangle_strike(long_strike, underlying, opp_type)
+    best_strike = round_strike_to_tick(symmetric)
+    if best_strike <= 0:
+        print("ERROR: Symetrický strike je neplatný", flush=True)
+        return None
+
+    print(f"DEBUG: Symetrický strike pre {opp_type}: {best_strike}", flush=True)
     return best_strike
+
+
+def generate_symmetry_rows(long_info, opp_info, underlying, iv, r, span=11, step=1):
+    """Vytvorí 22 riadkov s P/L pre cenu podkladu ± span a pripočíta theta."""
+    theta_long, theta_opp = compute_option_thetas(long_info, opp_info, underlying, iv, r)
+    rows = []
+    for offset in range(-span, span):
+        price = underlying + offset * step
+        if price <= 0:
+            continue
+        long_value = estimate_option_value(
+            long_info['type'], price, long_info['strike'], long_info['premium'], underlying
+        )
+        opp_value = estimate_option_value(
+            opp_info['type'], price, opp_info['strike'], opp_info['premium'], underlying
+        )
+        pl_long = (long_value - long_info['premium']) * 100
+        pl_opp = (opp_value - opp_info['premium']) * 100
+        rows.append({
+            'price': price,
+            'long': pl_long,
+            'opp': pl_opp,
+            'total': pl_long + pl_opp
+        })
+    return rows, theta_long, theta_opp
+
+
+def show_symmetry_table(state):
+    """Zobrazí tabuľku P/L hodnôt pre ±ATR pohyb na 1$ krokoch."""
+    if not hasattr(state, 'bal_last_analysis') or not state.bal_last_analysis:
+        messagebox.showwarning("Chyba", "Najprv spustite analýzu")
+        return
+
+    analysis = state.bal_last_analysis
+    long_info = analysis['long']
+    opp_info = analysis['opposite']
+    underlying = analysis['underlying']
+    analysis = state.bal_last_analysis
+    iv = analysis.get('iv', 0.20)
+    r = analysis.get('r', 0.0)
+    rows, theta_long, theta_opp = generate_symmetry_rows(long_info, opp_info, underlying, iv, r)
+    theta_total = theta_long + theta_opp
+    short_expiry = opp_info.get('expiry', '—')
+
+    win = tk.Toplevel(state.root)
+    win.title("Tabuľka symetrie")
+    win.geometry("500x400")
+
+    tree = ttk.Treeview(win, columns=("price", "long", "opp", "total"), show="headings")
+    tree.heading("price", text="Cena $")
+    tree.heading("long", text=f"Long {long_info['type']} P/L")
+    tree.heading("opp", text=f"Long {opp_info['type']} P/L")
+    tree.heading("total", text="Spolu P/L")
+    tree.column("price", anchor="center", width=80)
+    tree.column("long", anchor="center", width=110)
+    tree.column("opp", anchor="center", width=110)
+    tree.column("total", anchor="center", width=110)
+
+    scrollbar = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+
+    tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+    scrollbar.pack(side="right", fill="y", pady=10)
+
+    for row in rows:
+        tree.insert("", "end", values=(
+            f"{row['price']:.2f}",
+            f"{row['long']:+.2f}",
+            f"{row['opp']:+.2f}",
+            f"{row['total']:+.2f}"
+        ))
+
+    range_text = f"{rows[0]['price']:.2f} … {rows[-1]['price']:.2f}" if rows else "n/a"
+    theta_text = (f"Theta/den: LONG {long_info['type']} {theta_long:+.2f}$ | "
+                  f"LONG {opp_info['type']} {theta_opp:+.2f}$ | Spolu {theta_total:+.2f}$")
+    info_label = ttk.Label(win, text=f"Rozsah: {range_text} | krok 1 $ | Expirácia short leg: {short_expiry}\n{theta_text}",
+                           anchor="center")
+    info_label.pack(fill="x", pady=(0, 10))
 
 
 def bal_load_from_calculator(state):
@@ -289,6 +512,16 @@ def analyze_balancer(state):
             messagebox.showwarning("Chyba", "Cena podkladu musí byť > 0")
             return
         
+        atr_mult = 2.0
+        if hasattr(state, 'bal_plot_atr_mult_var'):
+            try:
+                atr_mult = float(state.bal_plot_atr_mult_var.get() or atr_mult)
+            except ValueError:
+                pass
+        atr = state.atr_7d if hasattr(state, 'atr_7d') and state.atr_7d and state.atr_7d > 0 else underlying * 0.05
+        symmetry_range = max(0.5, atr * atr_mult)
+        print(f"DEBUG: ATR-based symmetry range ±${symmetry_range:.2f}", flush=True)
+
         # Urči opačný typ (pre strangle: PUT + CALL)
         opp_type = 'CALL' if long_type == 'PUT' else 'PUT'
         state.bal_opposite_type_var.set(opp_type)  # Len "CALL" alebo "PUT"
@@ -326,6 +559,16 @@ def analyze_balancer(state):
         # Vypočítaj Time to Expiry (potrebné pre Black-Scholes)
         T = get_time_to_expiry_years(expiry)
         print(f"DEBUG: Time to expiry T={T:.4f} rokov ({T*365:.1f} dní)", flush=True)
+        
+        initial_balanced_strike = balanced_strike
+        symmetry_info = fine_tune_strike_by_symmetry(
+            balanced_strike, long_type, long_strike, long_premium,
+            opp_type, underlying, T, iv, r, symmetry_range
+        )
+        if symmetry_info and symmetry_info['strike'] != initial_balanced_strike:
+            print(f"DEBUG: Symmetry tuning upravil strike na {symmetry_info['strike']:.2f} "
+                  f"(diff {symmetry_info['strike_diff']:+.2f}, score {symmetry_info['score']:.2f})", flush=True)
+        balanced_strike = symmetry_info['strike'] if symmetry_info else balanced_strike
         
         # Stiahni REÁLNE premium z TWS pre vypočítaný strike
         print(f"DEBUG: Sťahujem reálne premium pre {opp_type} {balanced_strike} z TWS...", flush=True)
@@ -431,15 +674,15 @@ def analyze_balancer(state):
 ║  ──────────────────────────────────────────────────────────────── ║
 ║  Strike:     ${long_strike:>8.2f}                                              ║
 ║  Premium:    ${long_premium:>8.2f} (zaplatené)                              ║
-║  Aktuálna cena: ${long_current_price:>8.2f}                                        ║
+║  Aktuálna cena: ${long_current_price:>8.2f} (z Kalkulátora)                   ║
 ║  Expiry:     {expiry:>10}                                              ║
 ║  P/L @ ${underlying:.2f}:  ${pl_long:>8.2f}  (= ({long_current_price:.2f} - {long_premium:.2f}) × 100)    ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Riadok 2: LONG {opp_type:4} (vypočítaný pre vyvážený strangle)        ║
 ║  ──────────────────────────────────────────────────────────────── ║
 ║  Strike:     ${balanced_strike:>8.2f} (symetricky)                          ║
-║  Premium:    ${opp_premium:>8.2f} (odhadovaná)                              ║
-║  Aktuálna cena: ${opp_current_price:>8.2f}                                        ║
+║  Premium:    ${opp_premium:>8.2f} (odhadovaná / TWS)                         ║
+║  Aktuálna cena: ${opp_current_price:>8.2f} (z TWS / odhad)                   ║
 ║  Expiry:     {expiry:>10} (rovnaká)                                    ║
 ║  P/L @ ${underlying:.2f}:  ${pl_opp:>8.2f}  (= ({opp_current_price:.2f} - {opp_premium:.2f}) × 100)    ║
 ╠══════════════════════════════════════════════════════════════════╣
@@ -450,8 +693,18 @@ def analyze_balancer(state):
 ║  Break-even hore:    ${be_up:>8.2f}                                         ║
 ║  Break-even dole:    ${be_down:>8.2f}                                         ║
 ║  Underlying: ${underlying:>8.2f} | IV: {iv:>6.2%} | DTE: {int(T*365):>3} dní        ║
-╚══════════════════════════════════════════════════════════════════╝
 """
+
+        if symmetry_info:
+            sym_line = (f"║  Symmetria ±${symmetry_info['range']:.2f}: score "
+                        f"{symmetry_info['score']:.1f} (base {symmetry_info['base_score']:.1f})")
+            result_text += f"{sym_line.ljust(66)}║\n"
+            if abs(symmetry_info['strike_diff']) >= 0.01:
+                diff_line = (f"║  Strike upravený o {symmetry_info['strike_diff']:+.2f} "
+                             f"→ ${symmetry_info['strike']:.2f}")
+                result_text += f"{diff_line.ljust(66)}║\n"
+
+        result_text += "╚══════════════════════════════════════════════════════════════════╝\n"
         
         if hasattr(state, 'bal_results_text'):
             state.bal_results_text.delete(1.0, tk.END)
@@ -503,7 +756,8 @@ def analyze_balancer(state):
             },
             'underlying': underlying,
             'iv': iv,
-            'r': r
+            'r': r,
+            'symmetry': symmetry_info
         }
         
     except Exception as e:
@@ -577,109 +831,34 @@ def show_balancer_plot(state):
         return
     
     try:
-        analysis = state.bal_last_analysis
-        long_info = analysis['long']
-        opp_info = analysis['opposite']
-        underlying = analysis['underlying']
-        iv = analysis['iv']
-        r = analysis['r']
+        series = build_balancer_pl_series(state)
+        if not series:
+            messagebox.showwarning("Chyba", "Najprv spustite analýzu")
+            return
         
-        # Parametre
+        Ss = series['Ss']
+        pl_long_vals = series['pl_long']
+        pl_opp_vals = series['pl_opp']
+        pl_total_vals = series['pl_total']
+        atr = series['atr']
+        atr_mult = series['atr_mult']
+        underlying = series['underlying']
+        long_info = series['long_info']
+        opp_info = series['opp_info']
+        analysis = state.bal_last_analysis
+        iv = analysis.get('iv', 0.2)
+        r = analysis.get('r', 0.0)
         long_type = long_info['type']
         long_strike = long_info['strike']
         long_premium = long_info['premium']
-        
         opp_type = opp_info['type']
         opp_strike = opp_info['strike']
-        opp_premium = opp_info.get('premium', 0)
-        
+        opp_premium = opp_info['premium']
         expiry = long_info['expiry']
         T = get_time_to_expiry_years(expiry)
-        
-        # Rozsah cien podkladu - použijeme ATR
-        atr_mult = float(state.bal_plot_atr_mult_var.get() or 2.0)
-        atr = state.atr_7d if hasattr(state, 'atr_7d') and state.atr_7d and state.atr_7d > 0 else underlying * 0.05
-        
-        # Rozsah: underlying ± (ATR × multiplier)
-        low = max(0.01, underlying - atr * atr_mult)
-        high = underlying + atr * atr_mult
-        
+        low, high = series['range']
+
         print(f"DEBUG: ATR={atr:.2f}, multiplier={atr_mult}, rozsah=[{low:.2f}, {high:.2f}]")
-        
-        # Vytvor grid cien podkladu - hustejší grid pre lepšiu presnosť
-        n = 501  # Viac bodov pre plynulejší graf
-        Ss = [low + (high - low) * i / (n-1) for i in range(n)]
-        
-        # Vypočítaj PL pre každú cenu podkladu
-        pl_long_vals = []
-        pl_opp_vals = []
-        pl_total_vals = []
-        
-        for S in Ss:
-            # Používame aproximáciu: hodnota opcie sa mení podľa vzdialenosti od strike
-            # Pre LONG PUT: hodnota rastie, keď cena klesá pod strike
-            # Pre LONG CALL: hodnota rastie, keď cena stúpa nad strike
-            
-            # LONG PUT: čím nižšie S, tým vyššia hodnota
-            if long_type == 'PUT':
-                # Pri underlying: hodnota = long_premium
-                # Pri strike: hodnota = intrinsic + časová hodnota
-                # Aproximácia: lineárna zmena od aktuálnej ceny
-                if S >= long_strike:
-                    # OTM: len časová hodnota, klesá s rastúcou cenou
-                    distance = S - underlying
-                    # Časová hodnota klesá približne $0.10 za každý $1 pohyb od strike
-                    time_value_change = -0.10 * distance
-                    current_value_long = max(0.01, long_premium + time_value_change)
-                else:
-                    # ITM: intrinsic + časová hodnota
-                    intrinsic = long_strike - S
-                    # Približná časová hodnota
-                    time_value = long_premium if S >= underlying else long_premium * 0.5
-                    current_value_long = intrinsic + time_value
-            else:  # CALL
-                if S <= long_strike:
-                    # OTM
-                    distance = underlying - S
-                    time_value_change = -0.10 * distance
-                    current_value_long = max(0.01, long_premium + time_value_change)
-                else:
-                    # ITM
-                    intrinsic = S - long_strike
-                    time_value = long_premium if S <= underlying else long_premium * 0.5
-                    current_value_long = intrinsic + time_value
-            
-            pl_long = (current_value_long - long_premium) * 100
-            pl_long_vals.append(pl_long)
-            
-            # LONG opačná opcia
-            if opp_type == 'PUT':
-                if S >= opp_strike:
-                    distance = S - underlying
-                    time_value_change = -0.10 * distance
-                    current_value_opp = max(0.01, opp_premium + time_value_change)
-                else:
-                    intrinsic = opp_strike - S
-                    time_value = opp_premium if S >= underlying else opp_premium * 0.5
-                    current_value_opp = intrinsic + time_value
-            else:  # CALL
-                if S <= opp_strike:
-                    # OTM: časová hodnota klesá, keď sa vzďaľujeme
-                    distance = underlying - S
-                    time_value_change = -0.10 * distance
-                    current_value_opp = max(0.01, opp_premium + time_value_change)
-                else:
-                    # ITM: intrinsic + časová hodnota
-                    intrinsic = S - opp_strike
-                    time_value = opp_premium if S <= underlying else opp_premium * 0.5
-                    current_value_opp = intrinsic + time_value
-            
-            pl_opp = (current_value_opp - opp_premium) * 100
-            pl_opp_vals.append(pl_opp)
-            
-            # Celkový P/L
-            pl_total = pl_long + pl_opp
-            pl_total_vals.append(pl_total)
         
         # Vypočítaj P/L pri pohybe ±$1 od aktuálnej ceny
         idx_current = min(range(len(Ss)), key=lambda i: abs(Ss[i] - underlying))
@@ -797,7 +976,10 @@ def show_balancer_plot(state):
         info_text = f'Max. strata: ${min(pl_total_vals):.0f}\n'
         info_text += f'Celkový náklad: ${total_cost:.2f} (${total_cost*100:.0f})\n'
         info_text += f'DTE: {int(T*365)} dní | IV: {iv:.1%}\n'
-        info_text += f'ATR: ${atr:.2f} (rozsah: ±${atr*atr_mult:.2f})\n\n'
+        theta_text = (f"Theta/den: LONG {long_type} {series['theta_long']:+.2f} | "
+                      f"LONG {opp_type} {series['theta_opp']:+.2f}")
+        info_text += f'ATR: ${atr:.2f} (rozsah: ±${atr*atr_mult:.2f})\n'
+        info_text += f'{theta_text}\n\n'
         info_text += f'ZMENA P/L pri pohybe o $1:\n'
         info_text += f'  Hore (+$1): ${change_plus1:+.0f}\n'
         info_text += f'  Dole (-$1): ${change_minus1:+.0f}'
@@ -815,6 +997,55 @@ def show_balancer_plot(state):
         messagebox.showerror("Chyba", f"Chyba pri kreslení grafu: {e}")
         import traceback
         traceback.print_exc()
+
+
+def export_balancer_symmetry_table(state):
+    """Exportuje tabuľku s P/L pri pohybe ±$1 po ATR rozpätí."""
+    if not hasattr(state, 'bal_last_analysis') or not state.bal_last_analysis:
+        messagebox.showwarning("Chyba", "Najprv spustite analýzu")
+        return
+
+    analysis = state.bal_last_analysis
+    long_info = analysis['long']
+    opp_info = analysis['opposite']
+    underlying = analysis['underlying']
+    iv = analysis.get('iv', 0.20)
+    r = analysis.get('r', 0.0)
+    rows, theta_long, theta_opp = generate_symmetry_rows(long_info, opp_info, underlying, iv, r)
+
+    default_name = f"balancer_symmetry_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    path = filedialog.asksaveasfilename(
+        title="Ulož tabuľku symetrie",
+        defaultextension=".csv",
+        initialfile=default_name,
+        filetypes=[("CSV súbor", "*.csv"), ("Všetky súbory", "*.*")]
+    )
+    if not path:
+        return
+
+    try:
+        with open(path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Cena podkladu",
+                "Long1 P/L",
+                "Long2 P/L",
+                "Spolu P/L",
+                "Theta Long1",
+                "Theta Long2"
+            ])
+            for row in rows:
+                writer.writerow([
+                    f"{row['price']:.2f}",
+                    f"{row['long']:+.2f}",
+                    f"{row['opp']:+.2f}",
+                    f"{row['total']:+.2f}",
+                    f"{theta_long:+.2f}",
+                    f"{theta_opp:+.2f}",
+                ])
+        messagebox.showinfo("Hotovo", f"Exportované {len(rows)} riadkov do {path}")
+    except Exception as e:
+        messagebox.showerror("Chyba", f"Nepodarilo sa uložiť súbor: {e}")
 
 
 def create_balancer_tab(parent, state):
@@ -894,6 +1125,8 @@ def create_balancer_tab(parent, state):
     plot_row.pack(side='left', padx=20)
     ttk.Label(plot_row, text="Rozsah (×ATR):").pack(side='left', padx=5)
     ttk.Entry(plot_row, textvariable=state.bal_plot_atr_mult_var, width=6).pack(side='left', padx=5)
+    ttk.Button(plot_row, text="📤 Export symetrie", command=lambda: export_balancer_symmetry_table(state)).pack(side='left', padx=5)
+    ttk.Button(plot_row, text="📋 Tabuľka symetrie", command=lambda: show_symmetry_table(state)).pack(side='left', padx=5)
     ttk.Button(plot_row, text="📈 Zobraziť graf PL1+PL2", command=lambda: show_balancer_plot(state)).pack(side='left', padx=5)
     
     # === Výsledky ===
