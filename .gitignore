@@ -7,8 +7,10 @@ __pycache__/
 *.so
 *.egg
 *.egg-info/
+# Python
 build/
 dist/
+venv/
 
 # VSCode
 .vscode/
