@@ -2131,27 +2131,28 @@ Uložená:          {strategy.get('saved_at', '-')}
                     capture_output=True, text=True, timeout=20,
                     cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
-            if result.returncode != 0:
-                err = output or stderr or "TWS error"
-                self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
-                self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
-            elif not output:
-                err = stderr or "Žiadna odpoveď z TWS"
-                self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
-                self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
-            else:
-                try:
-                    price, _theta = parse_option_fetch_output(output)
-                    self.root.after(0, lambda: self.roll_current_premium_var.set(f"{price:.2f}"))
-                    self.root.after(0, lambda: self.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))
-                    # Vypočítaj DTE
-                    self.root.after(0, self.roll_update_dte)
-                except ValueError as err:
-                    msg = str(err)
+                
+                output = result.stdout.strip()
+                stderr = result.stderr.strip()
+                if result.returncode != 0:
+                    err = output or stderr or "TWS error"
                     self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
-                    self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{msg}"))
+                    self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
+                elif not output:
+                    err = stderr or "Žiadna odpoveď z TWS"
+                    self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
+                    self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
+                else:
+                    try:
+                        price, _theta = parse_option_fetch_output(output)
+                        self.root.after(0, lambda: self.roll_current_premium_var.set(f"{price:.2f}"))
+                        self.root.after(0, lambda: self.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))
+                        # Vypočítaj DTE
+                        self.root.after(0, self.roll_update_dte)
+                    except ValueError as err:
+                        msg = str(err)
+                        self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
+                        self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{msg}"))
             except Exception as e:
                 self.root.after(0, lambda: self.roll_status_label.config(text=f"❌ {str(e)[:30]}"))
         
