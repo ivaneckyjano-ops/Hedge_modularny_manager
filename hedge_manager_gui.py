@@ -1686,36 +1686,36 @@ Uložená:          {strategy.get('saved_at', '-')}
                     cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
+                output = result.stdout.strip()
+                stderr = result.stderr.strip()
 
-            if result.returncode != 0:
-                err = output or stderr or "TWS vrátil chybu"
-                self.root.after(0, lambda msg=err, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
-                return
+                if result.returncode != 0:
+                    err = output or stderr or "TWS vrátil chybu"
+                    self.root.after(0, lambda msg=err, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
+                    return
 
-            if not output:
-                err = stderr or "Žiadna odpoveď z TWS"
-                self.root.after(0, lambda msg=err, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
-                return
+                if not output:
+                    err = stderr or "Žiadna odpoveď z TWS"
+                    self.root.after(0, lambda msg=err, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
+                    return
 
-            try:
-                price, theta = parse_option_fetch_output(output)
-            except ValueError as err:
-                msg = str(err)
-                self.root.after(0, lambda msg=msg, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
-                return
+                try:
+                    price, theta = parse_option_fetch_output(output)
+                except ValueError as err:
+                    msg = str(err)
+                    self.root.after(0, lambda msg=msg, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
+                    return
 
-            if price > 0:
-                formatted_price = f"{price:.2f}"
-                self.root.after(0, lambda e=entry, val=formatted_price: self._update_premium_entry(e, val))
-                self.root.after(0, lambda key=premium_key, val=price: self._update_opt_premium(key, val))
-                self.root.after(0, lambda lt=leg, st=strike, val=formatted_price: self.update_calc_status(
-                    f"✓ {lt.upper()} {st} @ ${val}"))
-                self.root.after(100, self.recalculate_optimizer)
-            else:
-                self.root.after(0, lambda lt=leg: self.update_calc_status(f"❌ {lt}: Cena = 0"))
-                        
+                if price > 0:
+                    formatted_price = f"{price:.2f}"
+                    self.root.after(0, lambda e=entry, val=formatted_price: self._update_premium_entry(e, val))
+                    self.root.after(0, lambda key=premium_key, val=price: self._update_opt_premium(key, val))
+                    self.root.after(0, lambda lt=leg, st=strike, val=formatted_price: self.update_calc_status(
+                        f"✓ {lt.upper()} {st} @ ${val}"))
+                    self.root.after(100, self.recalculate_optimizer)
+                else:
+                    self.root.after(0, lambda lt=leg: self.update_calc_status(f"❌ {lt}: Cena = 0"))
+
             except subprocess.TimeoutExpired:
                 self.root.after(0, lambda: self.update_calc_status(f"❌ Timeout"))
             except Exception as e:
