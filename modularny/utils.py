@@ -156,7 +156,7 @@ def find_strike_for_delta(option_type, target_delta, expiry, iv, r, underlying):
 
 
 def parse_option_fetch_output(output):
-    """Rozparsuje JSON výstup z tws_fetch_option.py (price + theta)."""
+    """Rozparsuje JSON výstup z tws_fetch_option.py (price + theta + zdroj)."""
     if not output:
         raise ValueError("Žiadny výstup z TWS")
     if output.startswith("ERROR:"):
@@ -165,9 +165,10 @@ def parse_option_fetch_output(output):
         payload = json.loads(output)
         price = float(payload.get('price', 0))
         theta = float(payload.get('theta', 0))
-        return price, theta
+        source = payload.get('thetaSource', '') or 'tws'
+        return price, theta, source
     except (json.JSONDecodeError, ValueError):
-        return float(output.strip()), 0.0
+        return float(output.strip()), 0.0, 'raw'
 
 
 def format_comparison(orig, new):

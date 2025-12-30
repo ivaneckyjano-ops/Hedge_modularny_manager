@@ -81,6 +81,7 @@ def main():
             mid = 0
 
         theta = 0.0
+        theta_source = 'none'
         mg_ticker = None
         try:
             mg_ticker = ib.reqMktData(contract, '106', False, False)
@@ -89,6 +90,7 @@ def main():
                 greeks = getattr(mg_ticker, 'modelGreeks', None)
                 if greeks and getattr(greeks, 'theta', None) is not None:
                     theta = greeks.theta
+                    theta_source = 'tws'
                     break
         except Exception as e:
             print(f"DEBUG: Theta fetch error: {e}", file=sys.stderr)
@@ -101,7 +103,7 @@ def main():
         ib.disconnect()
 
         if mid > 0:
-            payload = {'price': round(mid, 2), 'theta': round(theta or 0.0, 4)}
+            payload = {'price': round(mid, 2), 'theta': round(theta or 0.0, 4), 'thetaSource': theta_source}
             print(json.dumps(payload))
         else:
             print("ERROR:No data (bid={}, ask={}, last={}, close={})".format(bid, ask, last, close))

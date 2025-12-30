@@ -170,7 +170,7 @@ def fetch_premium(state, leg):
                 return
 
             try:
-                price, theta = parse_option_fetch_output(output)
+                price, theta, _theta_source = parse_option_fetch_output(output)
             except ValueError as err:
                 msg = str(err)
                 if hasattr(state, 'calc_status_label'):

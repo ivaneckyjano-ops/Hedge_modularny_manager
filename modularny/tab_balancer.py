@@ -591,7 +591,7 @@ def analyze_balancer(state):
                 print(f"DEBUG: TWS vrátil prázdny výstup (stderr={stderr})", flush=True)
             else:
                 try:
-                    opp_premium, _theta = parse_option_fetch_output(output)
+                    opp_premium, _theta, _theta_source = parse_option_fetch_output(output)
                     print(f"DEBUG: Reálne premium z TWS: ${opp_premium:.2f}", flush=True)
                 except ValueError as err:
                     print(f"DEBUG: Neplatný výstup z TWS: {err}", flush=True)
@@ -819,7 +819,7 @@ def fetch_balancer_option_price(state):
                 state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
             else:
                 try:
-                    price, _theta = parse_option_fetch_output(output)
+                    price, _theta, _theta_source = parse_option_fetch_output(output)
                     state.root.after(0, lambda: state.bal_opposite_premium_var.set(f"{price:.2f}"))
                     if hasattr(state, 'bal_status_label'):
                         state.root.after(0, lambda: state.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))

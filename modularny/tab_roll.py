@@ -82,7 +82,7 @@ def roll_fetch_current_premium(state):
                 state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
             else:
                 try:
-                    price, _theta = parse_option_fetch_output(output)
+                    price, _theta, _theta_source = parse_option_fetch_output(output)
                     state.root.after(0, lambda: state.roll_current_premium_var.set(f"{price:.2f}"))
                     if hasattr(state, 'roll_status_label'):
                         state.root.after(0, lambda: state.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))

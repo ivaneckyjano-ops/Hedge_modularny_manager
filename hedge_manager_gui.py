@@ -792,7 +792,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                     return
 
                 try:
-                    price, theta = parse_option_fetch_output(output)
+                    price, theta, _theta_source = parse_option_fetch_output(output)
                 except ValueError as err:
                     msg = str(err)
                     self.root.after(0, lambda msg=msg, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
@@ -1700,7 +1700,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                     return
 
                 try:
-                    price, theta = parse_option_fetch_output(output)
+                    price, theta, _theta_source = parse_option_fetch_output(output)
                 except ValueError as err:
                     msg = str(err)
                     self.root.after(0, lambda msg=msg, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
@@ -2144,7 +2144,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                     self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
                 else:
                     try:
-                        price, _theta = parse_option_fetch_output(output)
+                        price, _theta, _theta_source = parse_option_fetch_output(output)
                         self.root.after(0, lambda: self.roll_current_premium_var.set(f"{price:.2f}"))
                         self.root.after(0, lambda: self.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))
                         # Vypočítaj DTE
@@ -2573,7 +2573,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                     self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
                 else:
                     try:
-                        price, _theta = parse_option_fetch_output(output)
+                        price, _theta, _theta_source = parse_option_fetch_output(output)
                         self.root.after(0, lambda: self.bal_opposite_premium_var.set(f"{price:.2f}"))
                         self.root.after(0, lambda: self.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))
                         self.bal_last_analysis['opposite']['price'] = price
