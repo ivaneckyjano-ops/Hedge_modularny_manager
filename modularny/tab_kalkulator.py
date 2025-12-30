@@ -10,15 +10,38 @@ import threading
 import os
 import sys
 import math
+import time
 from datetime import datetime
 
-from modularny.utils import get_time_to_expiry_years, parse_option_fetch_output, black_scholes_theta
+from modularny.utils import get_time_to_expiry_years, parse_option_fetch_output
+
+ENTRY_ERROR_STYLE = 'Error.TEntry'
 
 
 def update_calc_status(state, text):
     """Bezpečne aktualizuje status label v kalkulátore"""
     if hasattr(state, 'calc_status_label'):
         state.calc_status_label.config(text=text)
+
+
+def configure_entry_style(entry, success=True):
+    """Switch entry style between normal and error highlight."""
+    if not entry:
+        return
+    style = 'TEntry' if success else ENTRY_ERROR_STYLE
+    entry.configure(style=style)
+
+
+def mark_premium_entry(state, leg_type, success):
+    if leg_type == 'short':
+        entry = getattr(state, 'calc_short_premium_entry', None)
+    else:
+        entry = getattr(state, 'calc_long_premium_entry', None)
+    configure_entry_style(entry, success)
+
+
+def mark_theta_entry(state, success):
+    configure_entry_style(getattr(state, 'calc_long_theta_entry', None), success)
 
 
 def fetch_underlying_price(state):
@@ -88,84 +111,82 @@ def fetch_option_price(state, leg_type):
         try:
             script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_option.py')
             print(f"DEBUG fetch_option_price: symbol={symbol}, expiry={expiry}, strike={strike}, right={right}, port={port}", file=sys.stderr)
-            result = subprocess.run(
-                ['python3', script_path, str(port), symbol, expiry, str(strike), right],
-                capture_output=True, text=True, timeout=20,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
-            )
+            port_value = state.port_var.get().strip() or '7496'
+            cmd = ['python3', script_path, port_value, symbol, expiry, str(strike), right]
+            attempts = 3
+            last_output = ''
+            last_stderr = ''
+            price = 0
+            theta = 0
+            theta_source = 'N/A'
 
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
-
-            print(f"DEBUG fetch_option_price result: returncode={result.returncode}, stdout={output[:200]}, stderr={stderr[:200]}", file=sys.stderr)
-
-            if result.returncode != 0:
-                error_display = output or stderr or "TWS vrátil chybu"
-                state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ {leg_type}: {err}"))
-                state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť premium.\n\n{err}"))
-                if leg_type == 'long':
-                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
-                    state.root.after(0, lambda: state.calc_long_theta_source_var.set(''))
-                return
-
-            if not output:
-                error_display = stderr[:200] if stderr else "Žiadna odpoveď z TWS"
-                state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ TWS: {err}"))
-                state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba",
-                    f"Nepodarilo sa načítať premium.\n\n{err}\n\nSkontrolujte:\n- Pripojenie k TWS\n- Správny formát expirácie\n- Existujúcu opciu"))
-                if leg_type == 'long':
-                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
-                return
-
-            try:
-                price, theta, theta_source = parse_option_fetch_output(output)
-            except ValueError as err:
-                msg = str(err)
-                state.root.after(0, lambda err=msg, lt=leg_type: update_calc_status(state, f"❌ {lt}: {err}"))
-                if leg_type == 'long':
-                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
-                    state.root.after(0, lambda: state.calc_long_theta_source_var.set(''))
-                return
-
-            if price > 0:
-                formatted_price = f"{price:.2f}"
-                theta_value = theta
-                if theta_value == 0:
+            for attempt in range(1, attempts + 1):
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=20,
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                )
+                output = result.stdout.strip()
+                stderr = result.stderr.strip()
+                last_output, last_stderr = output, stderr
+                print(f"DEBUG fetch_option_price attempt={attempt} rc={result.returncode} out={output[:200]} err={stderr[:200]}", file=sys.stderr)
+                if result.returncode == 0 and output:
                     try:
-                        underlying = float(state.calc_underlying_price_var.get() or 0)
-                        iv = float(state.iv_var.get() or 0.20)
-                        rate = float(state.rate_var.get() or 0.0)
-                        T = get_time_to_expiry_years(expiry)
-                        if underlying > 0 and iv > 0 and expiry:
-                            theta_value = black_scholes_theta(
-                                underlying, float(strike), T, rate, iv, state.option_type_var.get()
-                            )
-                    except Exception:
-                        theta_value = 0.0
-                state.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
-                state.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: update_calc_status(state,
-                    f"✓ {lt.upper()} {st} @ ${val}"))
-                if leg_type == 'short':
-                    state.root.after(100, lambda: update_stoploss_label(state))
-                if leg_type == 'long':
-                    state.root.after(0, lambda th=theta_value: state.calc_long_theta_var.set(f"{th:+.4f}"))
-                    source_label = 'TWS' if theta_source == 'tws' and theta_value == theta else 'BS'
-                    state.root.after(0, lambda lbl=source_label: state.calc_long_theta_source_var.set(lbl))
-            else:
-                state.root.after(0, lambda lt=leg_type: update_calc_status(state,
-                    f"❌ {lt}: Cena = 0, zadajte manuálne"))
+                        price, theta, theta_source = parse_option_fetch_output(output)
+                        if price > 0:
+                            break
+                    except Exception as e:
+                        print(f"DEBUG parse error attempt {attempt}: {e}", file=sys.stderr)
+                if attempt < attempts:
+                    time.sleep(0.7)
+
+            if price <= 0:
+                error_display = last_output or last_stderr or "TWS vrátil chybu"
+                state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ {leg_type}: {err}"))
+                state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť premium.\n\n{err}" ))
+                mark_premium_entry(state, leg_type, False)
                 if leg_type == 'long':
                     state.root.after(0, lambda: state.calc_long_theta_var.set(''))
                     state.root.after(0, lambda: state.calc_long_theta_source_var.set(''))
+                    mark_theta_entry(state, False)
+                return
+
+            formatted_price = f"{price:.2f}"
+            theta_value = theta
+            mark_premium_entry(state, leg_type, True)
+            state.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
+            state.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: update_calc_status(state,
+                f"✓ {lt.upper()} {st} @ ${val}"))
+            if leg_type == 'short':
+                state.root.after(100, lambda: update_stoploss_label(state))
+            if leg_type == 'long':
+                state.root.after(0, lambda th=theta_value: state.calc_long_theta_var.set(f"{th:+.4f}"))
+                if theta_value and theta_source == 'tws':
+                    state.root.after(0, lambda: state.calc_long_theta_source_var.set('TWS'))
+                    if hasattr(state, 'calc_long_theta_source_label'):
+                        state.root.after(0, lambda: state.calc_long_theta_source_label.config(foreground='grey'))
+                    mark_theta_entry(state, True)
+                else:
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                    state.root.after(0, lambda: state.calc_long_theta_source_var.set('N/A'))
+                    if hasattr(state, 'calc_long_theta_source_label'):
+                        state.root.after(0, lambda: state.calc_long_theta_source_label.config(foreground='red'))
+                    mark_theta_entry(state, False)
 
         except subprocess.TimeoutExpired:
             state.root.after(0, lambda: update_calc_status(state, f"❌ Timeout - TWS neodpovedá"))
             state.root.after(0, lambda: messagebox.showwarning("Timeout",
                 "TWS neodpovedá včas.\n\nSkontrolujte pripojenie a skúste to znova."))
+            mark_premium_entry(state, leg_type, False)
+            if leg_type == 'long':
+                mark_theta_entry(state, False)
         except Exception as e:
             error_msg = str(e)
             print(f"DEBUG fetch_option_price exception: {error_msg}", file=sys.stderr)
             state.root.after(0, lambda err=error_msg: update_calc_status(state, f"❌ {err}"))
+            mark_premium_entry(state, leg_type, False)
+            if leg_type == 'long':
+                mark_theta_entry(state, False)
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -346,6 +367,12 @@ def calculate_spread(state):
             long_theta = float(state.calc_long_theta_var.get() or 0)
         except ValueError:
             long_theta = 0.0
+        long_theta_source = (state.calc_long_theta_source_var.get() or 'N/A').upper()
+        if long_theta != 0 and long_theta_source != 'TWS':
+            long_theta_source = 'MANUAL'
+            state.calc_long_theta_source_var.set('MANUAL')
+            if hasattr(state, 'calc_long_theta_source_label'):
+                state.calc_long_theta_source_label.config(foreground='grey')
         
         underlying_price = float(state.calc_underlying_price_var.get() or 0)
         
@@ -371,6 +398,15 @@ def calculate_spread(state):
             long_dte = max(1, (long_exp_date - today).days)
         else:
             long_dte = short_dte
+        
+        theta_daily = long_theta
+        theta_total_days = short_dte if short_dte > 0 else 0
+        theta_decay_cost = max(-theta_daily * theta_total_days * 100, 0)  # cost to subtract
+        theta_decay_display = theta_daily * theta_total_days * 100  # retains sign for output
+        theta_missing = (theta_daily == 0)
+        if theta_missing:
+            messagebox.showwarning("Chýba theta", "Theta long nohy nie je zadaná (TWS alebo manuál). Doplň ju (červené pole) a potom prepočítaj.")
+            return
         
         net_amount = short_premium - long_premium
         is_credit = net_amount > 0
@@ -449,16 +485,20 @@ def calculate_spread(state):
             
             break_even = short_strike + net_debit
             
-            if margin > 0:
-                profit_for_roi = short_premium * 100 if not same_expiry else max_profit
-                if profit_for_roi != float('inf'):
-                    total_roi = (profit_for_roi / margin) * 100
-                    weekly_roi = total_roi / short_dte * 7
-                    annual_roi = weekly_roi * 52
-                else:
-                    weekly_roi = annual_roi = 0
+        if margin > 0:
+            profit_for_roi = short_premium * 100 if not same_expiry else max_profit
+            # Pri kalendári zohľadníme rozpad long nohy do expirácie short
+            if not same_expiry and profit_for_roi != float('inf'):
+                profit_for_roi -= theta_decay_cost
+                profit_for_roi = max(profit_for_roi, 0)
+            if profit_for_roi != float('inf'):
+                total_roi = (profit_for_roi / margin) * 100
+                weekly_roi = total_roi / short_dte * 7
+                annual_roi = weekly_roi * 52
             else:
-                total_roi = weekly_roi = annual_roi = 0
+                weekly_roi = annual_roi = 0
+        else:
+            total_roi = weekly_roi = annual_roi = 0
         
         max_profit_str = f"${max_profit:,.2f}" if max_profit != float('inf') else "NEOBMEDZENÝ ↑"
         max_loss_str = f"${max_loss:,.2f}" if max_loss != float('inf') else "NEOBMEDZENÁ ↓"
@@ -504,7 +544,7 @@ def calculate_spread(state):
 ║  🟢 LONG LEG (kupujete):                                         ║
 ║     Strike: ${long_strike:,.2f}    Premium: ${long_premium:.2f}    DTE: {long_dte:3}        ║
 ║     Expiry: {long_expiry or 'N/A':10}                                       ║
-║     Theta: {long_theta:+.4f}                                             ║
+║     Theta: {long_theta:+.4f} (zdroj: {state.calc_long_theta_source_var.get() or 'N/A':>3})                ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  📐 TYP SPREADU: {spread_type:45}║
 ║  📏 Šírka spreadu: ${spread_width:,.2f}                                    ║
@@ -522,6 +562,8 @@ def calculate_spread(state):
 ║     Total ROI:    {total_roi:6.2f}% (za {short_dte} dní)                       ║
 ║     Weekly ROI:   {weekly_roi:6.2f}%                                        ║
 ║     Annual ROI:   {annual_roi:6.2f}% (projected)                           ║
+║  📉 Theta long/deň: {theta_daily:+.4f} ({long_theta_source:>3})                        ║
+║  Odhad rozpad do exp. short: ${theta_decay_display:,.2f}/kontrakt         ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  ⚠️  MANAGEMENT (Roll ak):                                       ║
 ║     Cena podkladu dosiahne short strike: ${short_strike:,.2f}              ║
@@ -530,9 +572,13 @@ def calculate_spread(state):
 
 📝 POZNÁMKY:
 • {credit_debit_label} = Short Premium (${short_premium:.2f}) - Long Premium (${long_premium:.2f})
+• ROI = (Short Premium × 100 − Theta rozpad long nohy) / Celkový kapitál × 100
 • {roi_note}
 • Hodnoty sú per 1 kontrakt (100 shares)
 """
+        
+        if theta_missing:
+            result += "\n⚠️ Theta z TWS chýba – pole je červené, doplň ju manuálne (inak ROI ignoruje rozpad long nohy)."
         
         if not is_credit:
             if not same_expiry and spread_width != 0:
@@ -694,7 +740,13 @@ def load_strategy(state, auto=False):
         state.calc_long_expiry_var.set(strategy.get('long_expiry', ''))
         state.calc_long_premium_var.set(strategy.get('long_premium', ''))
         state.calc_long_theta_var.set(strategy.get('long_theta', ''))
-        state.calc_long_theta_source_var.set(strategy.get('long_theta_source', ''))
+        src = strategy.get('long_theta_source', 'N/A')
+        state.calc_long_theta_source_var.set(src)
+        if hasattr(state, 'calc_long_theta_source_label'):
+            if src and str(src).upper() == 'TWS':
+                state.calc_long_theta_source_label.config(foreground='grey')
+            else:
+                state.calc_long_theta_source_label.config(foreground='red')
         state.broker_var.set(strategy.get('broker', 'IBKR'))
         
         state.save_settings_file()
@@ -724,6 +776,11 @@ def delete_strategy(state):
     state.calc_long_expiry_var.set('')
     state.calc_long_premium_var.set('')
     state.calc_long_theta_var.set('')
+    state.calc_long_theta_source_var.set('N/A')
+    if hasattr(state, 'calc_long_theta_source_label'):
+        state.calc_long_theta_source_label.config(foreground='red')
+    if hasattr(state, 'calc_long_theta_entry'):
+        state.calc_long_theta_entry.config(state='normal')
     state.calc_long_theta_source_var.set('')
     
     if hasattr(state, 'calc_result_text'):
@@ -737,6 +794,9 @@ def delete_strategy(state):
 def create_spread_calculator_tab(parent, state):
     """Záložka pre manuálny Spread Kalkulátor"""
     
+    style = ttk.Style()
+    style.configure(ENTRY_ERROR_STYLE, fieldbackground='#ffe6e6')
+
     # === ARCHÍV NASTAVENÍ ===
     archive_frame = ttk.LabelFrame(parent, text="💾 Archív Nastavení", padding=5)
     archive_frame.pack(fill='x', padx=10, pady=5)
@@ -817,7 +877,9 @@ def create_spread_calculator_tab(parent, state):
     state.calc_short_expiry_combo = calc_short_expiry_combo
     
     ttk.Label(short_row, text="Premium $:").pack(side='left', padx=5)
-    ttk.Entry(short_row, textvariable=state.calc_short_premium_var, width=8).pack(side='left', padx=5)
+    short_premium_entry = ttk.Entry(short_row, textvariable=state.calc_short_premium_var, width=8)
+    short_premium_entry.pack(side='left', padx=5)
+    state.calc_short_premium_entry = short_premium_entry
     
     ttk.Button(short_row, text="📥 Stiahnuť", command=lambda: fetch_option_price(state, 'short')).pack(side='left', padx=10)
     
@@ -841,11 +903,18 @@ def create_spread_calculator_tab(parent, state):
     state.calc_long_expiry_combo = calc_long_expiry_combo
     
     ttk.Label(long_row, text="Premium $:").pack(side='left', padx=5)
-    ttk.Entry(long_row, textvariable=state.calc_long_premium_var, width=8).pack(side='left', padx=5)
+    long_premium_entry = ttk.Entry(long_row, textvariable=state.calc_long_premium_var, width=8)
+    long_premium_entry.pack(side='left', padx=5)
+    state.calc_long_premium_entry = long_premium_entry
     ttk.Label(long_row, text="Theta $:").pack(side='left', padx=5)
-    ttk.Entry(long_row, textvariable=state.calc_long_theta_var, width=8, state='readonly').pack(side='left', padx=5)
+    long_theta_entry = ttk.Entry(long_row, textvariable=state.calc_long_theta_var, width=8, state='normal')
+    long_theta_entry.pack(side='left', padx=5)
+    state.calc_long_theta_entry = long_theta_entry
     ttk.Label(long_row, text="Zdroj:").pack(side='left', padx=5)
-    ttk.Label(long_row, textvariable=state.calc_long_theta_source_var, width=6, foreground='grey').pack(side='left', padx=5)
+    theta_src_label = ttk.Label(long_row, textvariable=state.calc_long_theta_source_var, width=6, foreground='grey')
+    theta_src_label.pack(side='left', padx=5)
+    state.calc_long_theta_source_label = theta_src_label
+    state.calc_long_theta_source_label.config(foreground='red')
     
     ttk.Button(long_row, text="📥 Stiahnuť", command=lambda: fetch_option_price(state, 'long')).pack(side='left', padx=10)
     

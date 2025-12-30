@@ -31,7 +31,7 @@ class SharedState:
         # ATR nastavenia
         self.atr_7d = None
         self.atr_last_updated = None
-        self.atr_multiplier_var = tk.DoubleVar(value=1.0)
+        self.atr_multiplier_var = tk.DoubleVar(value=2.0)
         
         # Stoploss na cenu opcie (násobok pôvodnej ceny)
         self.option_stoploss_mult_var = tk.DoubleVar(value=2.0)
@@ -61,7 +61,8 @@ class SharedState:
         self.calc_long_expiry_var = tk.StringVar()
         self.calc_long_premium_var = tk.StringVar()
         self.calc_long_theta_var = tk.StringVar()
-        self.calc_long_theta_source_var = tk.StringVar(value="TWS")
+        self.calc_long_theta_source_var = tk.StringVar(value="N/A")
+        self.calc_long_theta_entry = None
         self.calc_underlying_price_var = tk.StringVar()
         
         # Balancer (samostatné polia)
@@ -69,11 +70,17 @@ class SharedState:
         self.bal_long_strike_var = tk.StringVar()
         self.bal_long_expiry_var = tk.StringVar()
         self.bal_long_premium_var = tk.StringVar()
+        self.bal_long_theta_var = tk.StringVar()
+        self.bal_long_strike_entry = None
+        self.bal_opposite_strike_entry = None
+        self.bal_long_theta_entry = None
+        self.bal_opposite_theta_entry = None
         self.bal_underlying_var = tk.StringVar()
         self.bal_iv_var = tk.StringVar(value=self.iv_var.get())
         self.bal_opposite_type_var = tk.StringVar(value="PUT")
         self.bal_opposite_strike_var = tk.StringVar()
         self.bal_opposite_premium_var = tk.StringVar()
+        self.bal_opposite_theta_var = tk.StringVar()
         self.bal_last_analysis = None
         self.bal_type_note_var = tk.StringVar(value="")
         # Plotting controls

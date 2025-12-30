@@ -27,7 +27,8 @@ def main():
         print(f"DEBUG: Connecting to TWS on port {port}...", file=sys.stderr)
         sys.stderr.flush()
         ib.connect('127.0.0.1', port, clientId=random.randint(1000,9999), readonly=True, timeout=10)
-        ib.reqMarketDataType(3)  # Delayed
+        # Použij delayed frozen, aby boli modelGreeks dostupné
+        ib.reqMarketDataType(4)
         
         print(f"DEBUG: Creating Option contract...", file=sys.stderr)
         sys.stderr.flush()
@@ -80,12 +81,12 @@ def main():
         else:
             mid = 0
 
-        theta = 0.0
+        theta = None
         theta_source = 'none'
         mg_ticker = None
         try:
             mg_ticker = ib.reqMktData(contract, '106', False, False)
-            for _ in range(40):
+            for _ in range(60):  # o niečo dlhšie, aby prišla modelGreeks
                 ib.sleep(0.25)
                 greeks = getattr(mg_ticker, 'modelGreeks', None)
                 if greeks and getattr(greeks, 'theta', None) is not None:
@@ -103,7 +104,11 @@ def main():
         ib.disconnect()
 
         if mid > 0:
-            payload = {'price': round(mid, 2), 'theta': round(theta or 0.0, 4), 'thetaSource': theta_source}
+            payload = {
+                'price': round(mid, 2),
+                'theta': round(theta if theta is not None else 0.0, 4),
+                'thetaSource': theta_source
+            }
             print(json.dumps(payload))
         else:
             print("ERROR:No data (bid={}, ask={}, last={}, close={})".format(bid, ask, last, close))

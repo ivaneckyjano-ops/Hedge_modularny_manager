@@ -33,6 +33,30 @@ from modularny.utils import (
     get_time_to_expiry_years, parse_option_fetch_output
 )
 
+ENTRY_ERROR_STYLE = 'Error.TEntry'
+
+
+def configure_balancer_entry_style(entry, success=True):
+    if not entry:
+        return
+    style = 'TEntry' if success else ENTRY_ERROR_STYLE
+    entry.configure(style=style)
+
+
+def mark_balancer_fields(state, leg, success):
+    if leg == 'long':
+        entries = [
+            getattr(state, 'bal_long_strike_entry', None),
+            getattr(state, 'bal_long_theta_entry', None)
+        ]
+    else:
+        entries = [
+            getattr(state, 'bal_opposite_strike_entry', None),
+            getattr(state, 'bal_opposite_theta_entry', None)
+        ]
+    for entry in entries:
+        configure_balancer_entry_style(entry, success)
+
 
 def round_strike_to_tick(value, tick=0.5):
     """Zaokrúhli strike na najbližší krok (default 0.5)."""
@@ -396,6 +420,7 @@ def bal_load_from_calculator(state):
             error_msg += f"- Long Premium: {long_premium or '(prázdne)'}"
             print(f"DEBUG: CHYBA - chýbajúce polia:\n{error_msg}", flush=True)
             messagebox.showwarning("Chyba", error_msg)
+            mark_balancer_fields(state, 'long', False)
             return
         
         if not underlying:
@@ -418,6 +443,7 @@ def bal_load_from_calculator(state):
         state.bal_long_strike_var.set(long_strike)
         state.bal_long_expiry_var.set(long_expiry)
         state.bal_long_premium_var.set(long_premium)
+        state.bal_long_theta_var.set(state.calc_long_theta_var.get())
         state.bal_underlying_var.set(underlying)
         state.bal_long_type_var.set(option_type)
         
@@ -765,7 +791,7 @@ def analyze_balancer(state):
             'r': r,
             'symmetry': symmetry_info
         }
-        
+        mark_balancer_fields(state, 'long', True)
     except Exception as e:
         print(f"DEBUG: EXCEPTION v analyze_balancer: {e}", flush=True)
         import traceback
@@ -812,28 +838,39 @@ def fetch_balancer_option_price(state):
                 if hasattr(state, 'bal_status_label'):
                     state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
                 state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
-            elif not output:
+                mark_balancer_fields(state, 'opposite', False)
+                return
+            if not output:
                 err = stderr or "Žiadna odpoveď z TWS"
                 if hasattr(state, 'bal_status_label'):
                     state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
                 state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
-            else:
-                try:
-                    price, _theta, _theta_source = parse_option_fetch_output(output)
-                    state.root.after(0, lambda: state.bal_opposite_premium_var.set(f"{price:.2f}"))
-                    if hasattr(state, 'bal_status_label'):
-                        state.root.after(0, lambda: state.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))
-                    state.bal_last_analysis['opposite']['price'] = price
-                    # Prepočítaj graf ak existuje
-                    state.root.after(100, lambda: show_balancer_plot(state))
-                except ValueError as err:
-                    msg = str(err)
-                    if hasattr(state, 'bal_status_label'):
-                        state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
-                    state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{msg}"))
+                mark_balancer_fields(state, 'opposite', False)
+                return
+            try:
+                price, theta, theta_source = parse_option_fetch_output(output)
+            except ValueError as err:
+                msg = str(err)
+                if hasattr(state, 'bal_status_label'):
+                    state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
+                state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{msg}"))
+                mark_balancer_fields(state, 'opposite', False)
+                return
+            formatted_price = f"{price:.2f}"
+            formatted_theta = f"{theta:+.4f}"
+            state.root.after(0, lambda: state.bal_opposite_premium_var.set(formatted_price))
+            state.root.after(0, lambda: state.bal_opposite_theta_var.set(formatted_theta))
+            if hasattr(state, 'bal_status_label'):
+                state.root.after(0, lambda: state.bal_status_label.config(
+                    text=f"✓ Cena {right} strike {strike} @ ${formatted_price} | theta {formatted_theta}"))
+            state.bal_last_analysis['opposite']['price'] = price
+            state.bal_last_analysis['opposite']['theta'] = theta
+            state.root.after(100, lambda: show_balancer_plot(state))
+            mark_balancer_fields(state, 'opposite', True)
         except Exception as e:
             if hasattr(state, 'bal_status_label'):
                 state.root.after(0, lambda: state.bal_status_label.config(text=f"❌ {str(e)[:40]}"))
+            mark_balancer_fields(state, 'opposite', False)
     
     threading.Thread(target=run, daemon=True).start()
 
@@ -1072,6 +1109,9 @@ def export_balancer_symmetry_table(state):
 def create_balancer_tab(parent, state):
     """Záložka pre Balancer"""
     
+    style = ttk.Style()
+    style.configure(ENTRY_ERROR_STYLE, fieldbackground='#ffe6e6')
+
     # === Riadok 1: LONG opcia (z Kalkulátora) ===
     long_frame = ttk.LabelFrame(parent, text="Riadok 1: LONG opcia (z Kalkulátora)", padding=10)
     long_frame.pack(fill='x', padx=10, pady=5)
@@ -1085,10 +1125,16 @@ def create_balancer_tab(parent, state):
     ttk.Button(long_row1, text="📥 Načítať z Kalkulátora", command=lambda: bal_load_from_calculator(state)).pack(side='left', padx=10)
     
     ttk.Label(long_row1, text="Strike:").pack(side='left', padx=5)
-    ttk.Entry(long_row1, textvariable=state.bal_long_strike_var, width=10, state='readonly').pack(side='left', padx=5)
+    strike_entry = ttk.Entry(long_row1, textvariable=state.bal_long_strike_var, width=10)
+    strike_entry.pack(side='left', padx=5)
+    state.bal_long_strike_entry = strike_entry
     
     ttk.Label(long_row1, text="Premium $:").pack(side='left', padx=5)
     ttk.Entry(long_row1, textvariable=state.bal_long_premium_var, width=8, state='readonly').pack(side='left', padx=5)
+    ttk.Label(long_row1, text="Theta $:").pack(side='left', padx=5)
+    theta_entry = ttk.Entry(long_row1, textvariable=state.bal_long_theta_var, width=8)
+    theta_entry.pack(side='left', padx=5)
+    state.bal_long_theta_entry = theta_entry
     
     ttk.Label(long_row1, text="Expiry:").pack(side='left', padx=5)
     ttk.Entry(long_row1, textvariable=state.bal_long_expiry_var, width=12, state='readonly').pack(side='left', padx=5)
@@ -1106,7 +1152,7 @@ def create_balancer_tab(parent, state):
     ttk.Label(opp_row1, text="(LONG opcia)", foreground='blue').pack(side='left', padx=5)
     
     ttk.Label(opp_row1, text="Strike:").pack(side='left', padx=5)
-    strike_entry = ttk.Entry(opp_row1, textvariable=state.bal_opposite_strike_var, width=10, state='readonly')
+    strike_entry = ttk.Entry(opp_row1, textvariable=state.bal_opposite_strike_var, width=10)
     strike_entry.pack(side='left', padx=5)
     # Ulož referenciu na Entry widget pre debug
     state.bal_opposite_strike_entry = strike_entry
@@ -1114,6 +1160,10 @@ def create_balancer_tab(parent, state):
     
     ttk.Label(opp_row1, text="Premium $:").pack(side='left', padx=5)
     ttk.Entry(opp_row1, textvariable=state.bal_opposite_premium_var, width=8).pack(side='left', padx=5)
+    ttk.Label(opp_row1, text="Theta $:").pack(side='left', padx=5)
+    opp_theta_entry = ttk.Entry(opp_row1, textvariable=state.bal_opposite_theta_var, width=8)
+    opp_theta_entry.pack(side='left', padx=5)
+    state.bal_opposite_theta_entry = opp_theta_entry
     ttk.Button(opp_row1, text="📥 Stiahnuť presnú cenu", command=lambda: fetch_balancer_option_price(state)).pack(side='left', padx=10)
     
     ttk.Label(opp_row1, text="Expiry:").pack(side='left', padx=5)

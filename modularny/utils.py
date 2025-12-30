@@ -164,7 +164,8 @@ def parse_option_fetch_output(output):
     try:
         payload = json.loads(output)
         price = float(payload.get('price', 0))
-        theta = float(payload.get('theta', 0))
+        theta_val = payload.get('theta', 0)
+        theta = float(theta_val or 0)
         source = payload.get('thetaSource', '') or 'tws'
         return price, theta, source
     except (json.JSONDecodeError, ValueError):

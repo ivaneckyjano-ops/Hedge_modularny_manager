@@ -124,7 +124,7 @@ class HedgeManagerGUI:
         # ATR nastavenia
         self.atr_7d = None
         self.atr_last_updated = None
-        self.atr_multiplier_var = tk.DoubleVar(value=1.0)
+        self.atr_multiplier_var = tk.DoubleVar(value=2.0)
         self.option_stoploss_mult_var = tk.DoubleVar(value=2.0)
         
         # Pre position monitor
