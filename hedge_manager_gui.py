@@ -70,6 +70,7 @@ try:
     from modularny.tab_kalkulator import create_spread_calculator_tab
     from modularny.tab_optimizer import create_interactive_optimizer_tab
     from modularny.tab_roll import create_roll_optimizer_tab
+    from modularny.utils import parse_option_fetch_output
     MODULAR_AVAILABLE = True
 except ImportError as e:
     MODULAR_AVAILABLE = False
@@ -148,6 +149,7 @@ class HedgeManagerGUI:
         self.calc_long_strike_var = tk.StringVar()
         self.calc_long_expiry_var = tk.StringVar()
         self.calc_long_premium_var = tk.StringVar()
+        self.calc_long_theta_var = tk.StringVar()
         self.calc_underlying_price_var = tk.StringVar()
         
         # Balancer
@@ -701,7 +703,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(self.port_var.get()), self.symbol_var.get()], 
                     capture_output=True, text=True, timeout=20,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
                 output = result.stdout.strip()
@@ -761,46 +763,65 @@ Uložená:          {strategy.get('saved_at', '-')}
         
         def run():
             try:
-                script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'tws_fetch_option.py')
-                result = subprocess.run(
-                    ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
-                    capture_output=True, text=True, timeout=20,
-                    cwd=str(BASE_DIR)
-                )
-                
-                output = result.stdout.strip()
-                stderr = result.stderr.strip()
-                
-                if output.startswith("ERROR:"):
-                    error_msg = output.replace("ERROR:", "")
-                    self.root.after(0, lambda msg=error_msg, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
-                    self.root.after(0, lambda msg=error_msg, lt=leg_type: messagebox.showwarning("Chyba", 
+            script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'tws_fetch_option.py')
+            result = subprocess.run(
+                ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
+                capture_output=True, text=True, timeout=20,
+                cwd='/home/narbon/Aplikácie/tws-webapp'
+            )
+            
+            output = result.stdout.strip()
+            stderr = result.stderr.strip()
+            
+                if result.returncode != 0:
+                    err = output or stderr or "TWS vrátil chybu"
+                    self.root.after(0, lambda msg=err, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
+                    self.root.after(0, lambda msg=err, lt=leg_type: messagebox.showwarning("Chyba", 
                         f"Nepodarilo sa stiahnuť cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
-                elif result.returncode == 0 and output:
-                    try:
-                        price = float(output)
-                        if price > 0:
-                            self.root.after(0, lambda pvar=premium_var, val=output: pvar.set(val))
-                            self.root.after(0, lambda lt=leg_type, st=strike, val=output: self.update_calc_status(
-                                f"✓ {lt.upper()} {st} @ ${val}"))
-                            # Aktualizuj stoploss label ak je SHORT
-                            if leg_type == 'short':
-                                self.root.after(100, self.update_stoploss_label)
-                        else:
-                            self.root.after(0, lambda lt=leg_type: self.update_calc_status(
-                                f"❌ {lt}: Cena = 0, zadajte manuálne"))
-                    except ValueError:
-                        self.root.after(0, lambda out=output: self.update_calc_status(
-                            f"❌ Neplatná odpoveď: {out}"))
-                elif not output:
-                    self.root.after(0, lambda err=stderr[:100]: self.update_calc_status(f"❌ TWS: {err}"))
-                else:
-                    self.root.after(0, lambda: self.update_calc_status(f"❌ Nepodarilo sa načítať premium"))
+                    if leg_type == 'long':
+                        self.root.after(0, lambda: self.calc_long_theta_var.set(''))
+                    return
+
+                if not output:
+                    err = stderr[:100] if stderr else "Žiadna odpoveď z TWS"
+                    self.root.after(0, lambda msg=err, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
+                    self.root.after(0, lambda msg=err, lt=leg_type: messagebox.showwarning("Chyba", 
+                        f"Nepodarilo sa načítať cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
+                    if leg_type == 'long':
+                        self.root.after(0, lambda: self.calc_long_theta_var.set(''))
+                    return
+
+            try:
+                price, theta = parse_option_fetch_output(output)
+                except ValueError as err:
+                    msg = str(err)
+                    self.root.after(0, lambda msg=msg, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
+                    self.root.after(0, lambda msg=msg, lt=leg_type: messagebox.showwarning("Chyba", 
+                        f"Nepodarilo sa stiahnuť cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
+                    if leg_type == 'long':
+                        self.root.after(0, lambda: self.calc_long_theta_var.set(''))
+                    return
+
+            if price > 0:
+                formatted_price = f"{price:.2f}"
+                self.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
+                self.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: self.update_calc_status(
+                    f"✓ {lt.upper()} {st} @ ${val}"))
+                # Aktualizuj stoploss label ak je SHORT
+                if leg_type == 'short':
+                    self.root.after(100, self.update_stoploss_label)
+                if leg_type == 'long':
+                    self.root.after(0, lambda th=theta: self.calc_long_theta_var.set(f"{th:+.4f}"))
+            else:
+                self.root.after(0, lambda lt=leg_type: self.update_calc_status(
+                    f"❌ {lt}: Cena = 0, zadajte manuálne"))
+                if leg_type == 'long':
+                    self.root.after(0, lambda: self.calc_long_theta_var.set(''))
                         
-            except subprocess.TimeoutExpired:
-                self.root.after(0, lambda: self.update_calc_status(f"❌ Timeout - TWS neodpovedá"))
-            except Exception as e:
-                self.root.after(0, lambda err=str(e): self.update_calc_status(f"❌ {err}"))
+        except subprocess.TimeoutExpired:
+            self.root.after(0, lambda: self.update_calc_status(f"❌ Timeout - TWS neodpovedá"))
+        except Exception as e:
+            self.root.after(0, lambda err=str(e): self.update_calc_status(f"❌ {err}"))
         
         threading.Thread(target=run, daemon=True).start()
 
@@ -817,7 +838,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol],
                     capture_output=True, text=True, timeout=15,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
                 output = result.stdout.strip()
@@ -1662,34 +1683,38 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
                     capture_output=True, text=True, timeout=20,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
-                output = result.stdout.strip()
-                
-                if output.startswith("ERROR:"):
-                    error_msg = output.replace("ERROR:", "")
-                    self.root.after(0, lambda msg=error_msg, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
-                elif result.returncode == 0 and output:
-                    try:
-                        price = float(output)
-                        if price > 0:
-                            # Aktualizuj entry pole
-                            self.root.after(0, lambda e=entry, val=output: self._update_premium_entry(e, val))
-                            # Aktualizuj opt_data
-                            self.root.after(0, lambda key=premium_key, val=price: self._update_opt_premium(key, val))
-                            self.root.after(0, lambda lt=leg, st=strike, val=output: self.update_calc_status(
-                                f"✓ {lt.upper()} {st} @ ${val}"))
-                            # Automaticky prepočítaj
-                            self.root.after(100, self.recalculate_optimizer)
-                        else:
-                            self.root.after(0, lambda lt=leg: self.update_calc_status(f"❌ {lt}: Cena = 0"))
-                    except ValueError:
-                        self.root.after(0, lambda out=output: self.update_calc_status(f"❌ Neplatná odpoveď: {out}"))
-                elif not output:
-                    self.root.after(0, lambda: self.update_calc_status(f"❌ TWS neodpovedá"))
-                else:
-                    self.root.after(0, lambda: self.update_calc_status(f"❌ Nepodarilo sa načítať premium"))
+            output = result.stdout.strip()
+            stderr = result.stderr.strip()
+
+            if result.returncode != 0:
+                err = output or stderr or "TWS vrátil chybu"
+                self.root.after(0, lambda msg=err, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
+                return
+
+            if not output:
+                err = stderr or "Žiadna odpoveď z TWS"
+                self.root.after(0, lambda msg=err, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
+                return
+
+            try:
+                price, theta = parse_option_fetch_output(output)
+            except ValueError as err:
+                msg = str(err)
+                self.root.after(0, lambda msg=msg, lt=leg: self.update_calc_status(f"❌ {lt}: {msg}"))
+                return
+
+            if price > 0:
+                formatted_price = f"{price:.2f}"
+                self.root.after(0, lambda e=entry, val=formatted_price: self._update_premium_entry(e, val))
+                self.root.after(0, lambda key=premium_key, val=price: self._update_opt_premium(key, val))
+                self.root.after(0, lambda lt=leg, st=strike, val=formatted_price: self.update_calc_status(
+                    f"✓ {lt.upper()} {st} @ ${val}"))
+                self.root.after(100, self.recalculate_optimizer)
+            else:
+                self.root.after(0, lambda lt=leg: self.update_calc_status(f"❌ {lt}: Cena = 0"))
                         
             except subprocess.TimeoutExpired:
                 self.root.after(0, lambda: self.update_calc_status(f"❌ Timeout"))
@@ -2071,7 +2096,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(self.port_var.get()), self.symbol_var.get()], 
                     capture_output=True, text=True, timeout=20,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 output = result.stdout.strip().split('\n')[0]
                 if result.returncode == 0 and output and not output.startswith("ERROR:"):
@@ -2104,17 +2129,29 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
                     capture_output=True, text=True, timeout=20,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
-                output = result.stdout.strip()
-                if result.returncode == 0 and output and not output.startswith("ERROR:"):
-                    price = float(output)
+            output = result.stdout.strip()
+            stderr = result.stderr.strip()
+            if result.returncode != 0:
+                err = output or stderr or "TWS error"
+                self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
+                self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
+            elif not output:
+                err = stderr or "Žiadna odpoveď z TWS"
+                self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
+                self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
+            else:
+                try:
+                    price, _theta = parse_option_fetch_output(output)
                     self.root.after(0, lambda: self.roll_current_premium_var.set(f"{price:.2f}"))
                     self.root.after(0, lambda: self.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))
                     # Vypočítaj DTE
                     self.root.after(0, self.roll_update_dte)
-                else:
+                except ValueError as err:
+                    msg = str(err)
                     self.root.after(0, lambda: self.roll_status_label.config(text="❌ Chyba načítania premium"))
+                    self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{msg}"))
             except Exception as e:
                 self.root.after(0, lambda: self.roll_status_label.config(text=f"❌ {str(e)[:30]}"))
         
@@ -2259,7 +2296,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'tws_fetch_price.py')
                 result = subprocess.run(['python3', script_path, str(self.port_var.get()), self.symbol_var.get()],
                                         capture_output=True, text=True, timeout=20,
-                                        cwd=str(BASE_DIR))
+                                        cwd='/home/narbon/Aplikácie/tws-webapp')
                 out = result.stdout.strip().split('\n')[0] if result.stdout else ''
                 if result.returncode == 0 and out and not out.startswith("ERROR:"):
                     self.root.after(0, lambda v=out: self.bal_underlying_var.set(v))
@@ -2521,18 +2558,28 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right],
                     capture_output=True, text=True, timeout=20,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 output = result.stdout.strip()
-                if result.returncode == 0 and output and not output.startswith("ERROR:"):
-                    price = float(output)
-                    self.root.after(0, lambda: self.bal_opposite_premium_var.set(f"{price:.2f}"))
-                    self.root.after(0, lambda: self.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))
-                    self.bal_last_analysis['opposite']['price'] = price
-                else:
-                    err = output or result.stderr.strip()
+                stderr = result.stderr.strip()
+                if result.returncode != 0:
+                    err = output or stderr or "TWS vrátil chybu"
                     self.root.after(0, lambda: self.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
                     self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
+                elif not output:
+                    err = stderr or "Žiadna odpoveď z TWS"
+                    self.root.after(0, lambda: self.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
+                    self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
+                else:
+                    try:
+                        price, _theta = parse_option_fetch_output(output)
+                        self.root.after(0, lambda: self.bal_opposite_premium_var.set(f"{price:.2f}"))
+                        self.root.after(0, lambda: self.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))
+                        self.bal_last_analysis['opposite']['price'] = price
+                    except ValueError as err:
+                        msg = str(err)
+                        self.root.after(0, lambda: self.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
+                        self.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{msg}"))
             except Exception as e:
                 self.root.after(0, lambda: self.bal_status_label.config(text=f"❌ {str(e)[:40]}"))
         threading.Thread(target=run, daemon=True).start()
@@ -3025,8 +3072,8 @@ Skóre:          {s['score']:.1f}
                     stdout=subprocess.PIPE, 
                     stderr=subprocess.STDOUT,
                     text=True,
-                    cwd=str(BASE_DIR),
-                    env={**os.environ, 'PATH': VENV_BIN + ':' + os.environ.get('PATH', '')}
+                    cwd='/home/narbon/Aplikácie/tws-webapp',
+                    env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')}
                 )
                 
                 output_lines = []
@@ -3377,7 +3424,7 @@ Skóre:          {s['score']:.1f}
                 result = subprocess.run(
                     ['python3', script_path, str(self.port_var.get()), self.symbol_var.get(), right], 
                     capture_output=True, text=True, timeout=45,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
                 if result.returncode == 0 and result.stdout.strip():
@@ -3469,8 +3516,8 @@ Skóre:          {s['score']:.1f}
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
-                                       cwd=str(BASE_DIR),
-                                       env={**os.environ, 'PATH': VENV_BIN + ':' + os.environ.get('PATH', '')})
+                                       cwd='/home/narbon/Aplikácie/tws-webapp',
+                                       env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')})
                 
                 output = result.stdout + result.stderr
                 self.root.after(0, lambda: self.display_hedge_result(output))
@@ -3699,8 +3746,8 @@ PRE NASTAVENIE V BROKERI ({self.symbol_var.get()} {opt_type}):
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                       cwd=str(BASE_DIR),
-                                       env={**os.environ, 'PATH': VENV_BIN + ':' + os.environ.get('PATH', '')})
+                                       cwd='/home/narbon/Aplikácie/tws-webapp',
+                                       env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')})
                 
                 if result.returncode == 0:
                     try:
@@ -3736,8 +3783,8 @@ PRE NASTAVENIE V BROKERI ({self.symbol_var.get()} {opt_type}):
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                       cwd=str(BASE_DIR),
-                                       env={**os.environ, 'PATH': VENV_BIN + ':' + os.environ.get('PATH', '')})
+                                       cwd='/home/narbon/Aplikácie/tws-webapp',
+                                       env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')})
                 
                 output = result.stdout + result.stderr
                 self.root.after(0, lambda: self.display_monitor_result(output))
@@ -3847,7 +3894,7 @@ TIP: Pre testovanie používajte Paper Trading (port 7497)
                 result = subprocess.run(
                     ['python3', script_path, str(port)], 
                     capture_output=True, text=True, timeout=15,
-                    cwd=str(BASE_DIR)
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
                 if result.returncode == 0 and result.stdout.strip():

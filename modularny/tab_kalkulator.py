@@ -12,7 +12,7 @@ import sys
 import math
 from datetime import datetime
 
-from modularny.utils import get_time_to_expiry_years
+from modularny.utils import get_time_to_expiry_years, parse_option_fetch_output
 
 
 def update_calc_status(state, text):
@@ -63,27 +63,6 @@ def fetch_underlying_price(state):
     threading.Thread(target=run, daemon=True).start()
 
 
-def fetch_option_price(state, leg_type):
-    """Stiahne cenu konkrétnej opcie"""
-    if leg_type == 'short':
-        strike = state.calc_short_strike_var.get()
-        expiry = state.calc_short_expiry_var.get()
-        premium_var = state.calc_short_premium_var
-    else:
-        strike = state.calc_long_strike_var.get()
-        expiry = state.calc_long_expiry_var.get()
-        premium_var = state.calc_long_premium_var
-
-    if not strike or not expiry:
-        messagebox.showwarning("Chyba", f"Zadajte strike a expiry")
-        return
-    
-    right = 'C' if state.option_type_var.get() == 'CALL' else 'P'
-    symbol = state.symbol_var.get()
-    port = state.port_var.get()
-    
-    update_calc_status(state, f"Sťahujem {leg_type} {strike}...")
-    
     def run():
         try:
             script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_option.py')
@@ -97,37 +76,49 @@ def fetch_option_price(state, leg_type):
             output = result.stdout.strip()
             stderr = result.stderr.strip()
             
-            print(f"DEBUG fetch_option_price result: returncode={result.returncode}, stdout={output[:100]}, stderr={stderr[:200]}", file=sys.stderr)
+            print(f"DEBUG fetch_option_price result: returncode={result.returncode}, stdout={output[:200]}, stderr={stderr[:200]}", file=sys.stderr)
             
-            if output.startswith("ERROR:"):
-                error_msg = output.replace("ERROR:", "").strip()
-                full_error = f"{error_msg}\n\nDebug info:\n{stderr[:300]}" if stderr else error_msg
-                state.root.after(0, lambda msg=error_msg, lt=leg_type: update_calc_status(state, f"❌ {lt}: {msg}"))
-                state.root.after(0, lambda msg=full_error, lt=leg_type: messagebox.showwarning("Chyba", 
-                    f"Nepodarilo sa stiahnuť cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
-            elif result.returncode == 0 and output:
-                try:
-                    price = float(output)
-                    if price > 0:
-                        state.root.after(0, lambda pvar=premium_var, val=output: pvar.set(val))
-                        state.root.after(0, lambda lt=leg_type, st=strike, val=output: update_calc_status(state,
-                            f"✓ {lt.upper()} {st} @ ${val}"))
-                        if leg_type == 'short':
-                            state.root.after(100, lambda: update_stoploss_label(state))
-                    else:
-                        state.root.after(0, lambda lt=leg_type: update_calc_status(state,
-                            f"❌ {lt}: Cena = 0, zadajte manuálne"))
-                except ValueError:
-                    state.root.after(0, lambda out=output: update_calc_status(state,
-                        f"❌ Neplatná odpoveď: {out}"))
-            elif not output:
+            if result.returncode != 0:
+                error_display = output or stderr or "TWS vrátil chybu"
+                state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ {leg_type}: {err}"))
+                state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť premium.\n\n{err}"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                return
+
+            if not output:
                 error_display = stderr[:200] if stderr else "Žiadna odpoveď z TWS"
                 state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ TWS: {err}"))
                 state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba", 
                     f"Nepodarilo sa načítať premium.\n\n{err}\n\nSkontrolujte:\n- Pripojenie k TWS\n- Správny formát expirácie\n- Existujúcu opciu"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                return
+
+            try:
+                price, theta = parse_option_fetch_output(output)
+            except ValueError as err:
+                msg = str(err)
+                state.root.after(0, lambda err=msg, lt=leg_type: update_calc_status(state, f"❌ {lt}: {err}"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                return
+
+            if price > 0:
+                formatted_price = f"{price:.2f}"
+                state.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
+                state.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: update_calc_status(state,
+                    f"✓ {lt.upper()} {st} @ ${val}"))
+                if leg_type == 'short':
+                    state.root.after(100, lambda: update_stoploss_label(state))
+                if leg_type == 'long':
+                    state.root.after(0, lambda th=theta: state.calc_long_theta_var.set(f"{th:+.4f}"))
             else:
-                state.root.after(0, lambda: update_calc_status(state, f"❌ Nepodarilo sa načítať premium"))
-                    
+                state.root.after(0, lambda lt=leg_type: update_calc_status(state,
+                    f"❌ {lt}: Cena = 0, zadajte manuálne"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+
         except subprocess.TimeoutExpired:
             state.root.after(0, lambda: update_calc_status(state, f"❌ Timeout - TWS neodpovedá"))
             state.root.after(0, lambda: messagebox.showwarning("Timeout", 
@@ -312,6 +303,10 @@ def calculate_spread(state):
         long_strike = float(state.calc_long_strike_var.get() or 0)
         long_premium = float(state.calc_long_premium_var.get() or 0)
         long_expiry = state.calc_long_expiry_var.get()
+        try:
+            long_theta = float(state.calc_long_theta_var.get() or 0)
+        except ValueError:
+            long_theta = 0.0
         
         underlying_price = float(state.calc_underlying_price_var.get() or 0)
         
@@ -470,6 +465,7 @@ def calculate_spread(state):
 ║  🟢 LONG LEG (kupujete):                                         ║
 ║     Strike: ${long_strike:,.2f}    Premium: ${long_premium:.2f}    DTE: {long_dte:3}        ║
 ║     Expiry: {long_expiry or 'N/A':10}                                       ║
+║     Theta: {long_theta:+.4f}                                             ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  📐 TYP SPREADU: {spread_type:45}║
 ║  📏 Šírka spreadu: ${spread_width:,.2f}                                    ║
@@ -562,6 +558,7 @@ def calculate_spread(state):
             'shortDTE': short_dte,
             'longStrike': long_strike,
             'longPremium': long_premium,
+            'longTheta': long_theta,
             'longExpiry': long_expiry,
             'longDTE': long_dte,
             'netCredit': net_credit if is_credit else -net_debit,
@@ -605,6 +602,7 @@ def save_strategy(state):
             'long_strike': state.calc_long_strike_var.get(),
             'long_expiry': state.calc_long_expiry_var.get(),
             'long_premium': state.calc_long_premium_var.get(),
+            'long_theta': state.calc_long_theta_var.get(),
             'broker': state.broker_var.get(),
             'saved_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
@@ -654,6 +652,7 @@ def load_strategy(state, auto=False):
         state.calc_long_strike_var.set(strategy.get('long_strike', ''))
         state.calc_long_expiry_var.set(strategy.get('long_expiry', ''))
         state.calc_long_premium_var.set(strategy.get('long_premium', ''))
+        state.calc_long_theta_var.set(strategy.get('long_theta', ''))
         state.broker_var.set(strategy.get('broker', 'IBKR'))
         
         state.save_settings_file()
@@ -682,6 +681,7 @@ def delete_strategy(state):
     state.calc_long_strike_var.set('')
     state.calc_long_expiry_var.set('')
     state.calc_long_premium_var.set('')
+    state.calc_long_theta_var.set('')
     
     if hasattr(state, 'calc_result_text'):
         state.calc_result_text.config(state='normal')
@@ -799,6 +799,8 @@ def create_spread_calculator_tab(parent, state):
     
     ttk.Label(long_row, text="Premium $:").pack(side='left', padx=5)
     ttk.Entry(long_row, textvariable=state.calc_long_premium_var, width=8).pack(side='left', padx=5)
+    ttk.Label(long_row, text="Theta $:").pack(side='left', padx=5)
+    ttk.Entry(long_row, textvariable=state.calc_long_theta_var, width=8, state='readonly').pack(side='left', padx=5)
     
     ttk.Button(long_row, text="📥 Stiahnuť", command=lambda: fetch_option_price(state, 'long')).pack(side='left', padx=10)
     

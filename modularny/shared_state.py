@@ -60,6 +60,7 @@ class SharedState:
         self.calc_long_strike_var = tk.StringVar()
         self.calc_long_expiry_var = tk.StringVar()
         self.calc_long_premium_var = tk.StringVar()
+        self.calc_long_theta_var = tk.StringVar()
         self.calc_underlying_price_var = tk.StringVar()
         
         # Balancer (samostatné polia)

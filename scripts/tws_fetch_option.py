@@ -5,6 +5,7 @@ sys.path.insert(0, '/home/narbon/Aplikácie/tws-webapp/venv/lib/python3.12/site-
 from ib_insync import IB, Option
 import random
 import math
+import json
 
 def main():
     if len(sys.argv) < 6:
@@ -61,15 +62,15 @@ def main():
         sys.stderr.flush()
         ticker = ib.reqMktData(contract, '', True, False)  # snapshot=True, použijeme qualified contract
         ib.sleep(5)
-        
+
         bid = ticker.bid if ticker.bid and not math.isnan(ticker.bid) and ticker.bid > 0 else 0
         ask = ticker.ask if ticker.ask and not math.isnan(ticker.ask) and ticker.ask > 0 else 0
         last = ticker.last if ticker.last and not math.isnan(ticker.last) and ticker.last > 0 else 0
         close = ticker.close if ticker.close and not math.isnan(ticker.close) and ticker.close > 0 else 0
-        
+
         print(f"DEBUG: Market data - bid={bid}, ask={ask}, last={last}, close={close}", file=sys.stderr)
         sys.stderr.flush()
-        
+
         if bid > 0 and ask > 0:
             mid = (bid + ask) / 2
         elif last > 0:
@@ -78,12 +79,30 @@ def main():
             mid = close
         else:
             mid = 0
-        
+
+        theta = 0.0
+        mg_ticker = None
+        try:
+            mg_ticker = ib.reqMktData(contract, '106', False, False)
+            for _ in range(40):
+                ib.sleep(0.25)
+                greeks = getattr(mg_ticker, 'modelGreeks', None)
+                if greeks and getattr(greeks, 'theta', None) is not None:
+                    theta = greeks.theta
+                    break
+        except Exception as e:
+            print(f"DEBUG: Theta fetch error: {e}", file=sys.stderr)
+            sys.stderr.flush()
+        finally:
+            if mg_ticker:
+                ib.cancelMktData(mg_ticker)
+
         ib.cancelMktData(contract)
         ib.disconnect()
-        
+
         if mid > 0:
-            print("{:.2f}".format(mid))
+            payload = {'price': round(mid, 2), 'theta': round(theta or 0.0, 4)}
+            print(json.dumps(payload))
         else:
             print("ERROR:No data (bid={}, ask={}, last={}, close={})".format(bid, ask, last, close))
             

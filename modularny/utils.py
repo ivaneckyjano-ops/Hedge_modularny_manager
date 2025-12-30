@@ -6,6 +6,7 @@ Utility funkcie pre Hedge Manager GUI
 - Pomocné funkcie
 """
 import math
+import json
 from datetime import datetime, date
 
 try:
@@ -136,6 +137,21 @@ def find_strike_for_delta(option_type, target_delta, expiry, iv, r, underlying):
             best_k = k
     
     return round(best_k, 2) if best_k else None
+
+
+def parse_option_fetch_output(output):
+    """Rozparsuje JSON výstup z tws_fetch_option.py (price + theta)."""
+    if not output:
+        raise ValueError("Žiadny výstup z TWS")
+    if output.startswith("ERROR:"):
+        raise ValueError(output.replace("ERROR:", "").strip())
+    try:
+        payload = json.loads(output)
+        price = float(payload.get('price', 0))
+        theta = float(payload.get('theta', 0))
+        return price, theta
+    except (json.JSONDecodeError, ValueError):
+        return float(output.strip()), 0.0
 
 
 def format_comparison(orig, new):

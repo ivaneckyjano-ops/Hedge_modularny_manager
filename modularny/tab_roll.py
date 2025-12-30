@@ -11,6 +11,8 @@ import os
 import math
 from datetime import datetime, date
 
+from modularny.utils import parse_option_fetch_output
+
 try:
     from scipy.stats import norm
     SCIPY_AVAILABLE = True
@@ -67,15 +69,29 @@ def roll_fetch_current_premium(state):
                 cwd='/home/narbon/Aplikácie/tws-webapp'
             )
             output = result.stdout.strip()
-            if result.returncode == 0 and output and not output.startswith("ERROR:"):
-                price = float(output)
-                state.root.after(0, lambda: state.roll_current_premium_var.set(f"{price:.2f}"))
-                if hasattr(state, 'roll_status_label'):
-                    state.root.after(0, lambda: state.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))
-                state.root.after(0, lambda: roll_update_dte(state))
-            else:
+            stderr = result.stderr.strip()
+            if result.returncode != 0:
+                err = output or stderr or "TWS error"
                 if hasattr(state, 'roll_status_label'):
                     state.root.after(0, lambda: state.roll_status_label.config(text="❌ Chyba načítania premium"))
+                state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
+            elif not output:
+                err = stderr or "Žiadna odpoveď z TWS"
+                if hasattr(state, 'roll_status_label'):
+                    state.root.after(0, lambda: state.roll_status_label.config(text="❌ Chyba načítania premium"))
+                state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{err}"))
+            else:
+                try:
+                    price, _theta = parse_option_fetch_output(output)
+                    state.root.after(0, lambda: state.roll_current_premium_var.set(f"{price:.2f}"))
+                    if hasattr(state, 'roll_status_label'):
+                        state.root.after(0, lambda: state.roll_status_label.config(text=f"✓ LONG @ ${price:.2f}"))
+                    state.root.after(0, lambda: roll_update_dte(state))
+                except ValueError as err:
+                    msg = str(err)
+                    if hasattr(state, 'roll_status_label'):
+                        state.root.after(0, lambda: state.roll_status_label.config(text="❌ Chyba načítania premium"))
+                    state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa načítať premium:\n{msg}"))
         except Exception as e:
             if hasattr(state, 'roll_status_label'):
                 state.root.after(0, lambda: state.roll_status_label.config(text=f"❌ {str(e)[:30]}"))

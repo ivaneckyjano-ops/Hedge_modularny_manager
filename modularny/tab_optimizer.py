@@ -10,7 +10,7 @@ import threading
 import os
 from datetime import datetime
 
-from modularny.utils import format_comparison, format_single_strategy
+from modularny.utils import format_comparison, format_single_strategy, parse_option_fetch_output
 
 
 def load_from_calculator(state):
@@ -155,36 +155,39 @@ def fetch_premium(state, leg):
             )
             
             output = result.stdout.strip()
-            
-            if output.startswith("ERROR:"):
-                error_msg = output.replace("ERROR:", "")
+            stderr = result.stderr.strip()
+
+            if result.returncode != 0:
+                err = output or stderr or "TWS vrátil chybu"
                 if hasattr(state, 'calc_status_label'):
-                    state.root.after(0, lambda msg=error_msg, lt=leg: state.calc_status_label.config(text=f"❌ {lt}: {msg}"))
-            elif result.returncode == 0 and output:
-                try:
-                    price = float(output)
-                    if price > 0:
-                        # Aktualizuj entry pole
-                        state.root.after(0, lambda e=entry, val=output: _update_premium_entry(e, val))
-                        # Aktualizuj opt_data
-                        state.root.after(0, lambda key=premium_key, val=price: _update_opt_premium(state, key, val))
-                        if hasattr(state, 'calc_status_label'):
-                            state.root.after(0, lambda lt=leg, st=strike, val=output: state.calc_status_label.config(
-                                text=f"✓ {lt.upper()} {st} @ ${val}"))
-                        # Automaticky prepočítaj
-                        state.root.after(100, lambda: recalculate_optimizer(state))
-                    else:
-                        if hasattr(state, 'calc_status_label'):
-                            state.root.after(0, lambda lt=leg: state.calc_status_label.config(text=f"❌ {lt}: Cena = 0"))
-                except ValueError:
-                    if hasattr(state, 'calc_status_label'):
-                        state.root.after(0, lambda out=output: state.calc_status_label.config(text=f"❌ Neplatná odpoveď: {out}"))
-            elif not output:
+                    state.root.after(0, lambda msg=err, lt=leg: state.calc_status_label.config(text=f"❌ {lt}: {msg}"))
+                return
+
+            if not output:
+                err = stderr or "Žiadna odpoveď z TWS"
                 if hasattr(state, 'calc_status_label'):
-                    state.root.after(0, lambda: state.calc_status_label.config(text=f"❌ TWS neodpovedá"))
+                    state.root.after(0, lambda msg=err, lt=leg: state.calc_status_label.config(text=f"❌ {lt}: {msg}"))
+                return
+
+            try:
+                price, theta = parse_option_fetch_output(output)
+            except ValueError as err:
+                msg = str(err)
+                if hasattr(state, 'calc_status_label'):
+                    state.root.after(0, lambda m=msg, lt=leg: state.calc_status_label.config(text=f"❌ {lt}: {m}"))
+                return
+
+            if price > 0:
+                formatted_price = f"{price:.2f}"
+                state.root.after(0, lambda e=entry, val=formatted_price: _update_premium_entry(e, val))
+                state.root.after(0, lambda key=premium_key, val=price: _update_opt_premium(state, key, val))
+                if hasattr(state, 'calc_status_label'):
+                    state.root.after(0, lambda lt=leg, st=strike, val=formatted_price: state.calc_status_label.config(
+                        text=f"✓ {lt.upper()} {st} @ ${val}"))
+                state.root.after(100, lambda: recalculate_optimizer(state))
             else:
                 if hasattr(state, 'calc_status_label'):
-                    state.root.after(0, lambda: state.calc_status_label.config(text=f"❌ Nepodarilo sa načítať premium"))
+                    state.root.after(0, lambda lt=leg: state.calc_status_label.config(text=f"❌ {lt}: Cena = 0"))
                     
         except subprocess.TimeoutExpired:
             if hasattr(state, 'calc_status_label'):

@@ -30,7 +30,7 @@ except Exception:
 from modularny.utils import (
     black_scholes_put_price, black_scholes_call_price,
     black_scholes_delta_put, black_scholes_delta_call,
-    get_time_to_expiry_years
+    get_time_to_expiry_years, parse_option_fetch_output
 )
 
 
@@ -584,11 +584,17 @@ def analyze_balancer(state):
             )
             
             output = result.stdout.strip()
-            if result.returncode == 0 and output and not output.startswith("ERROR:"):
-                opp_premium = float(output)
-                print(f"DEBUG: Reálne premium z TWS: ${opp_premium:.2f}", flush=True)
+            stderr = result.stderr.strip()
+            if result.returncode != 0:
+                print(f"DEBUG: TWS error ({result.returncode}): {output or stderr}", flush=True)
+            elif not output:
+                print(f"DEBUG: TWS vrátil prázdny výstup (stderr={stderr})", flush=True)
             else:
-                print(f"DEBUG: Nepodarilo sa stiahnuť z TWS: {output}", flush=True)
+                try:
+                    opp_premium, _theta = parse_option_fetch_output(output)
+                    print(f"DEBUG: Reálne premium z TWS: ${opp_premium:.2f}", flush=True)
+                except ValueError as err:
+                    print(f"DEBUG: Neplatný výstup z TWS: {err}", flush=True)
         except Exception as e:
             print(f"DEBUG: Chyba pri sťahovaní z TWS: {e}", flush=True)
         
@@ -800,19 +806,31 @@ def fetch_balancer_option_price(state):
                 cwd='/home/narbon/Aplikácie/tws-webapp'
             )
             output = result.stdout.strip()
-            if result.returncode == 0 and output and not output.startswith("ERROR:"):
-                price = float(output)
-                state.root.after(0, lambda: state.bal_opposite_premium_var.set(f"{price:.2f}"))
-                if hasattr(state, 'bal_status_label'):
-                    state.root.after(0, lambda: state.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))
-                state.bal_last_analysis['opposite']['price'] = price
-                # Prepočítaj graf ak existuje
-                state.root.after(100, lambda: show_balancer_plot(state))
-            else:
-                err = output or result.stderr.strip()
+            stderr = result.stderr.strip()
+            if result.returncode != 0:
+                err = output or stderr or "TWS vrátil chybu"
                 if hasattr(state, 'bal_status_label'):
                     state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
                 state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
+            elif not output:
+                err = stderr or "Žiadna odpoveď z TWS"
+                if hasattr(state, 'bal_status_label'):
+                    state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
+                state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{err}"))
+            else:
+                try:
+                    price, _theta = parse_option_fetch_output(output)
+                    state.root.after(0, lambda: state.bal_opposite_premium_var.set(f"{price:.2f}"))
+                    if hasattr(state, 'bal_status_label'):
+                        state.root.after(0, lambda: state.bal_status_label.config(text=f"✓ Cena: ${price:.2f}"))
+                    state.bal_last_analysis['opposite']['price'] = price
+                    # Prepočítaj graf ak existuje
+                    state.root.after(100, lambda: show_balancer_plot(state))
+                except ValueError as err:
+                    msg = str(err)
+                    if hasattr(state, 'bal_status_label'):
+                        state.root.after(0, lambda: state.bal_status_label.config(text="❌ Chyba pri stiahnutí"))
+                    state.root.after(0, lambda: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť cenu:\n{msg}"))
         except Exception as e:
             if hasattr(state, 'bal_status_label'):
                 state.root.after(0, lambda: state.bal_status_label.config(text=f"❌ {str(e)[:40]}"))
