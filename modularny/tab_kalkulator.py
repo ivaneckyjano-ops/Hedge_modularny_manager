@@ -63,7 +63,93 @@ def fetch_underlying_price(state):
     threading.Thread(target=run, daemon=True).start()
 
 
+def fetch_option_price(state, leg_type):
+    """Stiahne cenu konkrétnej opcie"""
+    if leg_type == 'short':
+        strike = state.calc_short_strike_var.get()
+        expiry = state.calc_short_expiry_var.get()
+        premium_var = state.calc_short_premium_var
+    else:
+        strike = state.calc_long_strike_var.get()
+        expiry = state.calc_long_expiry_var.get()
+        premium_var = state.calc_long_premium_var
+
+    if not strike or not expiry:
+        messagebox.showwarning("Chyba", f"Zadajte strike a expiry")
+        return
+
+    right = 'C' if state.option_type_var.get() == 'CALL' else 'P'
+    symbol = state.symbol_var.get()
+    port = state.port_var.get()
+
+    update_calc_status(state, f"Sťahujem {leg_type} {strike}...")
+
     def run():
+        try:
+            script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_option.py')
+            print(f"DEBUG fetch_option_price: symbol={symbol}, expiry={expiry}, strike={strike}, right={right}, port={port}", file=sys.stderr)
+            result = subprocess.run(
+                ['python3', script_path, str(port), symbol, expiry, str(strike), right],
+                capture_output=True, text=True, timeout=20,
+                cwd='/home/narbon/Aplikácie/tws-webapp'
+            )
+
+            output = result.stdout.strip()
+            stderr = result.stderr.strip()
+
+            print(f"DEBUG fetch_option_price result: returncode={result.returncode}, stdout={output[:200]}, stderr={stderr[:200]}", file=sys.stderr)
+
+            if result.returncode != 0:
+                error_display = output or stderr or "TWS vrátil chybu"
+                state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ {leg_type}: {err}"))
+                state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba", f"Nepodarilo sa stiahnuť premium.\n\n{err}"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                return
+
+            if not output:
+                error_display = stderr[:200] if stderr else "Žiadna odpoveď z TWS"
+                state.root.after(0, lambda err=error_display: update_calc_status(state, f"❌ TWS: {err}"))
+                state.root.after(0, lambda err=error_display: messagebox.showwarning("Chyba",
+                    f"Nepodarilo sa načítať premium.\n\n{err}\n\nSkontrolujte:\n- Pripojenie k TWS\n- Správny formát expirácie\n- Existujúcu opciu"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                return
+
+            try:
+                price, theta = parse_option_fetch_output(output)
+            except ValueError as err:
+                msg = str(err)
+                state.root.after(0, lambda err=msg, lt=leg_type: update_calc_status(state, f"❌ {lt}: {err}"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+                return
+
+            if price > 0:
+                formatted_price = f"{price:.2f}"
+                state.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
+                state.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: update_calc_status(state,
+                    f"✓ {lt.upper()} {st} @ ${val}"))
+                if leg_type == 'short':
+                    state.root.after(100, lambda: update_stoploss_label(state))
+                if leg_type == 'long':
+                    state.root.after(0, lambda th=theta: state.calc_long_theta_var.set(f"{th:+.4f}"))
+            else:
+                state.root.after(0, lambda lt=leg_type: update_calc_status(state,
+                    f"❌ {lt}: Cena = 0, zadajte manuálne"))
+                if leg_type == 'long':
+                    state.root.after(0, lambda: state.calc_long_theta_var.set(''))
+
+        except subprocess.TimeoutExpired:
+            state.root.after(0, lambda: update_calc_status(state, f"❌ Timeout - TWS neodpovedá"))
+            state.root.after(0, lambda: messagebox.showwarning("Timeout",
+                "TWS neodpovedá včas.\n\nSkontrolujte pripojenie a skúste to znova."))
+        except Exception as e:
+            error_msg = str(e)
+            print(f"DEBUG fetch_option_price exception: {error_msg}", file=sys.stderr)
+            state.root.after(0, lambda err=error_msg: update_calc_status(state, f"❌ {err}"))
+
+    threading.Thread(target=run, daemon=True).start()
         try:
             script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_option.py')
             print(f"DEBUG fetch_option_price: symbol={symbol}, expiry={expiry}, strike={strike}, right={right}, port={port}", file=sys.stderr)
