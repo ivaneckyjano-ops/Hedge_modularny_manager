@@ -763,20 +763,20 @@ Uložená:          {strategy.get('saved_at', '-')}
         
         def run():
             try:
-            script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'tws_fetch_option.py')
-            result = subprocess.run(
-                ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
-                capture_output=True, text=True, timeout=20,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
-            )
-            
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
-            
+                script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'tws_fetch_option.py')
+                result = subprocess.run(
+                    ['python3', script_path, str(port), symbol, expiry, str(strike), right],
+                    capture_output=True, text=True, timeout=20,
+                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                )
+
+                output = result.stdout.strip()
+                stderr = result.stderr.strip()
+
                 if result.returncode != 0:
                     err = output or stderr or "TWS vrátil chybu"
                     self.root.after(0, lambda msg=err, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
-                    self.root.after(0, lambda msg=err, lt=leg_type: messagebox.showwarning("Chyba", 
+                    self.root.after(0, lambda msg=err, lt=leg_type: messagebox.showwarning("Chyba",
                         f"Nepodarilo sa stiahnuť cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
                     if leg_type == 'long':
                         self.root.after(0, lambda: self.calc_long_theta_var.set(''))
@@ -785,43 +785,43 @@ Uložená:          {strategy.get('saved_at', '-')}
                 if not output:
                     err = stderr[:100] if stderr else "Žiadna odpoveď z TWS"
                     self.root.after(0, lambda msg=err, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
-                    self.root.after(0, lambda msg=err, lt=leg_type: messagebox.showwarning("Chyba", 
+                    self.root.after(0, lambda msg=err, lt=leg_type: messagebox.showwarning("Chyba",
                         f"Nepodarilo sa načítať cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
                     if leg_type == 'long':
                         self.root.after(0, lambda: self.calc_long_theta_var.set(''))
                     return
 
-            try:
-                price, theta = parse_option_fetch_output(output)
+                try:
+                    price, theta = parse_option_fetch_output(output)
                 except ValueError as err:
                     msg = str(err)
                     self.root.after(0, lambda msg=msg, lt=leg_type: self.update_calc_status(f"❌ {lt}: {msg}"))
-                    self.root.after(0, lambda msg=msg, lt=leg_type: messagebox.showwarning("Chyba", 
+                    self.root.after(0, lambda msg=msg, lt=leg_type: messagebox.showwarning("Chyba",
                         f"Nepodarilo sa stiahnuť cenu pre {lt}.\n\n{msg}\n\nZadajte premium manuálne."))
                     if leg_type == 'long':
                         self.root.after(0, lambda: self.calc_long_theta_var.set(''))
                     return
 
-            if price > 0:
-                formatted_price = f"{price:.2f}"
-                self.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
-                self.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: self.update_calc_status(
-                    f"✓ {lt.upper()} {st} @ ${val}"))
-                # Aktualizuj stoploss label ak je SHORT
-                if leg_type == 'short':
-                    self.root.after(100, self.update_stoploss_label)
-                if leg_type == 'long':
-                    self.root.after(0, lambda th=theta: self.calc_long_theta_var.set(f"{th:+.4f}"))
-            else:
-                self.root.after(0, lambda lt=leg_type: self.update_calc_status(
-                    f"❌ {lt}: Cena = 0, zadajte manuálne"))
-                if leg_type == 'long':
-                    self.root.after(0, lambda: self.calc_long_theta_var.set(''))
-                        
-        except subprocess.TimeoutExpired:
-            self.root.after(0, lambda: self.update_calc_status(f"❌ Timeout - TWS neodpovedá"))
-        except Exception as e:
-            self.root.after(0, lambda err=str(e): self.update_calc_status(f"❌ {err}"))
+                if price > 0:
+                    formatted_price = f"{price:.2f}"
+                    self.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
+                    self.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: self.update_calc_status(
+                        f"✓ {lt.upper()} {st} @ ${val}"))
+                    # Aktualizuj stoploss label ak je SHORT
+                    if leg_type == 'short':
+                        self.root.after(100, self.update_stoploss_label)
+                    if leg_type == 'long':
+                        self.root.after(0, lambda th=theta: self.calc_long_theta_var.set(f"{th:+.4f}"))
+                else:
+                    self.root.after(0, lambda lt=leg_type: self.update_calc_status(
+                        f"❌ {lt}: Cena = 0, zadajte manuálne"))
+                    if leg_type == 'long':
+                        self.root.after(0, lambda: self.calc_long_theta_var.set(''))
+
+            except subprocess.TimeoutExpired:
+                self.root.after(0, lambda: self.update_calc_status(f"❌ Timeout - TWS neodpovedá"))
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self.update_calc_status(f"❌ {err}"))
         
         threading.Thread(target=run, daemon=True).start()
 
