@@ -59,6 +59,22 @@ def black_scholes_delta_call(S, K, T, r, sigma):
     return norm.cdf(d1)
 
 
+def black_scholes_theta(S, K, T, r, sigma, option_type='PUT'):
+    """Theta per day (Black-Scholes)"""
+    if T <= 0 or sigma <= 0:
+        return 0.0
+    if not SCIPY_AVAILABLE:
+        return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    theta_annual = -(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
+    if option_type == 'PUT':
+        theta_annual += r * K * math.exp(-r * T) * norm.cdf(-d2)
+    else:
+        theta_annual -= r * K * math.exp(-r * T) * norm.cdf(d2)
+    return theta_annual / 365.0
+
+
 def get_option_price(S, K, T, r, sigma, is_call=False):
     """Vráti cenu opcie podľa typu"""
     if is_call:

@@ -127,13 +127,26 @@ def fetch_option_price(state, leg_type):
 
             if price > 0:
                 formatted_price = f"{price:.2f}"
+                theta_value = theta
+                if theta_value == 0:
+                    try:
+                        underlying = float(state.calc_underlying_price_var.get() or 0)
+                        iv = float(state.iv_var.get() or 0.20)
+                        rate = float(state.rate_var.get() or 0.0)
+                        T = get_time_to_expiry_years(expiry)
+                        if underlying > 0 and iv > 0 and expiry:
+                            theta_value = black_scholes_theta(
+                                underlying, float(strike), T, rate, iv, state.option_type_var.get()
+                            )
+                    except Exception:
+                        theta_value = 0.0
                 state.root.after(0, lambda pvar=premium_var, val=formatted_price: pvar.set(val))
                 state.root.after(0, lambda lt=leg_type, st=strike, val=formatted_price: update_calc_status(state,
                     f"✓ {lt.upper()} {st} @ ${val}"))
                 if leg_type == 'short':
                     state.root.after(100, lambda: update_stoploss_label(state))
                 if leg_type == 'long':
-                    state.root.after(0, lambda th=theta: state.calc_long_theta_var.set(f"{th:+.4f}"))
+                    state.root.after(0, lambda th=theta_value: state.calc_long_theta_var.set(f"{th:+.4f}"))
             else:
                 state.root.after(0, lambda lt=leg_type: update_calc_status(state,
                     f"❌ {lt}: Cena = 0, zadajte manuálne"))
