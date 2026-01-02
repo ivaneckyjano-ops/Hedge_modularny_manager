@@ -364,7 +364,15 @@ def update_gs_status(state, text, color="black"):
             state.monitor_status_label.config(fg=color)
 
 def find_strangle_gs(state):
-    symbol, expiry, target, port = state.symbol_var.get(), state.calc_short_expiry_var.get(), state.gs_target_delta_var.get(), state.port_var.get()
+    symbol, expiry, target, port = state.symbol_var.get().strip().upper(), state.calc_short_expiry_var.get(), state.gs_target_delta_var.get(), state.port_var.get()
+    
+    # Automatické načítanie tolerancie driftu z archívu, ak existuje
+    if symbol in state.ticker_settings:
+        saved_tol = state.ticker_settings[symbol].get('drift_tolerance')
+        if saved_tol:
+            state.gs_drift_tol.set(str(saved_tol))
+            print(f"DEBUG: Automaticky načítaná tolerancia driftu pre {symbol}: {saved_tol}", file=sys.stderr)
+
     if not symbol or not expiry:
         messagebox.showwarning("Chyba", "Zadajte Symbol a Expiráciu")
         return
@@ -503,6 +511,7 @@ def check_position_gs(state):
             for sym in sorted_symbols:
                 sym_positions = portfolio[sym]
                 sym_delta = 0
+                sym_gamma = 0 # Pridané
                 sym_lines = []
                 
                 # Zoskupenie opcií podľa expirácií v rámci symbolu (stratégie)
@@ -521,13 +530,14 @@ def check_position_gs(state):
 
                 for exp, opt_list in expiries_in_sym.items():
                     exp_delta = 0
+                    exp_gamma = 0
                     report_lines.append(f"📦 STRATÉGIA: {sym} (Exp: {exp})")
                     for o in opt_list:
                         pos = float(o.get('position', 0))
                         right = o.get('right', '')
                         strike = o.get('strike', 0)
                         
-                        # Použijeme reálnu deltu ak je dostupná, inak odhad
+                        # Delta
                         real_delta = o.get('delta')
                         if real_delta is not None:
                             ed = real_delta * pos
@@ -538,10 +548,34 @@ def check_position_gs(state):
                             delta_label = f"{0.5*sign:+.2f} (Est.)"
                         
                         exp_delta += ed
+                        
+                        # Gamma
+                        real_gamma = o.get('gamma')
+                        if real_gamma is not None:
+                            exp_gamma += real_gamma * pos
+                        
                         report_lines.append(f"   • {right} {strike} x{pos:.0f} | Delta: {delta_label}")
                     
                     sym_delta += exp_delta
+                    sym_gamma += exp_gamma
                     report_lines.append(f"   📉 Net Delta ({exp}): {exp_delta:+.2f}")
+                    report_lines.append(f"   ⚛️ Total Gamma ({exp}): {exp_gamma:.5f}")
+                    
+                    # Výpočet potrebného pohybu pre drift (ak je Gamma > 0)
+                    tol = float(state.gs_drift_tol.get())
+                    if abs(exp_gamma) > 1e-7:
+                        # Potrebný zostávajúci drift k tolerancii
+                        drift_to_go_up = tol - exp_delta
+                        drift_to_go_down = -tol - exp_delta
+                        
+                        move_up = drift_to_go_up / exp_gamma if drift_to_go_up > 0 else 0
+                        move_down = drift_to_go_down / exp_gamma if drift_to_go_down < 0 else 0
+                        
+                        if move_up > 0 or move_down < 0:
+                            report_lines.append(f"   🎯 Potrebný pohyb pre Drift (±{tol}):")
+                            if move_up > 0: report_lines.append(f"      Hore: {move_up:+.2f} $")
+                            if move_down < 0: report_lines.append(f"      Dole: {move_down:+.2f} $")
+
                     report_lines.append("-" * 30)
 
                 # Kontrola driftu pre globálny status

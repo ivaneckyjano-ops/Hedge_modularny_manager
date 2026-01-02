@@ -22,7 +22,8 @@ class SharedState:
         self.profiles_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'profiles.json')
         self.saved_strategies = {}
         self.saved_gamma_scalper_strategies = {}
-        self.saved_gamma_semafor_configs = {} # Nový archív pre konfigurácie Gamma Semafora
+        self.saved_gamma_semafor_configs = {} 
+        self.ticker_settings = {} # Archív nastavení pre jednotlivé tickery (drift tol atď.)
         self.profiles = {}
         
         # Načítaj profily
@@ -499,7 +500,8 @@ class SharedState:
                     data = json.load(f)
                     self.saved_strategies = data.get('strategies', {})
                     self.saved_gamma_scalper_strategies = data.get('gamma_scalper_strategies', {})
-                    self.saved_gamma_semafor_configs = data.get('gamma_semafor_configs', {}) # Načítaj archív Semafora
+                    self.saved_gamma_semafor_configs = data.get('gamma_semafor_configs', {})
+                    self.ticker_settings = data.get('ticker_settings', {}) # Načítaj nastavenia tickerov
                     
                     # Načítaj globálne nastavenia Gamma Semaforu (len ako fallback, ak nie je vybratá konkrétna stratégia)
                     loaded_thresholds = data.get('gamma_semafor_thresholds', {})
@@ -553,7 +555,8 @@ class SharedState:
             data = {
                 'strategies': self.saved_strategies,
                 'gamma_scalper_strategies': self.saved_gamma_scalper_strategies,
-                'gamma_semafor_configs': self.saved_gamma_semafor_configs, # Uložíme archív Semafora
+                'gamma_semafor_configs': self.saved_gamma_semafor_configs,
+                'ticker_settings': self.ticker_settings, # Uložíme nastavenia tickerov
                 'default_gamma_semafor_config': self.gs_semafor_config_name_var.get(), # Uložíme poslednú použitú
                 'gs_model_priority': self.gs_model_priority_var.get()
             }

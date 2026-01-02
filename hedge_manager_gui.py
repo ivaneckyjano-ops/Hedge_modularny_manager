@@ -69,6 +69,7 @@ try:
     from modularny.tab_balancer import create_balancer_tab
     from modularny.tab_kalkulator import create_spread_calculator_tab
     from modularny.tab_gamma_scalper import create_gamma_scalper_tab
+    from modularny.tab_drift_manager import create_drift_manager_tab
     from modularny.tab_roll import create_roll_optimizer_tab
     from modularny.utils import parse_option_fetch_output
     MODULAR_AVAILABLE = True
@@ -230,6 +231,10 @@ class HedgeManagerGUI:
         notebook.add(tab3, text="🧘 Gamma Scalper")
         if MODULAR_AVAILABLE:
             create_gamma_scalper_tab(tab3, self.state)
+            
+            tab_drift = ttk.Frame(notebook)
+            notebook.add(tab_drift, text="🎯 Správca Driftu", image=self.get_icon('drift'))
+            create_drift_manager_tab(tab_drift, self.state)
         else:
             self.create_interactive_optimizer_tab(tab3)
         
