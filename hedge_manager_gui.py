@@ -233,7 +233,7 @@ class HedgeManagerGUI:
             create_gamma_scalper_tab(tab3, self.state)
             
             tab_drift = ttk.Frame(notebook)
-            notebook.add(tab_drift, text="🎯 Správca Driftu", image=self.get_icon('drift'))
+            notebook.add(tab_drift, text="🎯 Správca Driftu")
             create_drift_manager_tab(tab_drift, self.state)
         else:
             self.create_interactive_optimizer_tab(tab3)

@@ -2,10 +2,10 @@
 import argparse
 import sys
 import json
-from ib_insync import IB, Option, MarketOrder
+from ib_insync import IB, Option, MarketOrder, Contract
 
 def main():
-    parser = argparse.ArgumentParser(description='Place Strangle order in TWS')
+    parser = argparse.ArgumentParser(description='Place Strangle order in TWS as Combo')
     parser.add_argument('--symbol', required=True)
     parser.add_argument('--expiry', required=True)
     parser.add_argument('--call-strike', type=float, required=True)
@@ -25,27 +25,51 @@ def main():
     try:
         ib.connect('127.0.0.1', args.port, clientId=120)
         
-        # Define contracts
-        call_contract = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART')
-        put_contract = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART')
+        # 1. Definujeme jednotlivé nohy (Legs)
+        call_leg = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART')
+        put_leg = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART')
         
-        ib.qualifyContracts(call_contract, put_contract)
+        # Kvalifikácia kontraktov (získanie conId)
+        qualified = ib.qualifyContracts(call_leg, put_leg)
+        if len(qualified) < 2:
+            print(json.dumps({'success': False, 'error': 'Failed to qualify option contracts.'}))
+            return
+
+        # 2. Vytvoríme Combo kontrakt (BAG)
+        from ib_insync import ComboLeg
         
-        # Place orders
-        call_order = MarketOrder('BUY', args.quantity)
-        put_order = MarketOrder('BUY', args.quantity)
+        combo = Contract()
+        combo.symbol = args.symbol
+        combo.secType = 'BAG'
+        combo.currency = 'USD'
+        combo.exchange = 'SMART'
         
-        call_trade = ib.placeOrder(call_contract, call_order)
-        put_trade = ib.placeOrder(put_contract, put_order)
+        leg1 = ComboLeg()
+        leg1.conId = call_leg.conId
+        leg1.ratio = 1
+        leg1.action = 'BUY'
+        leg1.exchange = 'SMART'
         
-        # Small wait for status
+        leg2 = ComboLeg()
+        leg2.conId = put_leg.conId
+        leg2.ratio = 1
+        leg2.action = 'BUY'
+        leg2.exchange = 'SMART'
+        
+        combo.comboLegs = [leg1, leg2]
+        
+        # 3. Odoslanie Combo objednávky
+        order = MarketOrder('BUY', args.quantity)
+        trade = ib.placeOrder(combo, order)
+        
+        # Malý počkať na potvrdenie
         ib.sleep(1)
         
         print(json.dumps({
             'success': True, 
-            'call_order_id': call_trade.order.orderId,
-            'put_order_id': put_trade.order.orderId,
-            'status': 'Orders placed'
+            'order_id': trade.order.orderId,
+            'description': f'Strangle Combo ({args.call_strike}C + {args.put_strike}P) placed',
+            'status': trade.orderStatus.status
         }))
         
     except Exception as e:

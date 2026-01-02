@@ -370,7 +370,7 @@ def find_strangle_gs(state):
     if symbol in state.ticker_settings:
         saved_tol = state.ticker_settings[symbol].get('drift_tolerance')
         if saved_tol:
-            state.gs_drift_tol.set(str(saved_tol))
+            state.gs_drift_tol.set(f"{float(saved_tol):.2f}") # Zabezpečíme konzistentný formát
             print(f"DEBUG: Automaticky načítaná tolerancia driftu pre {symbol}: {saved_tol}", file=sys.stderr)
 
     if not symbol or not expiry:
