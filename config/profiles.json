@@ -1,0 +1,24 @@
+{
+  "profiles": {
+    "PAPER": {
+      "host": "127.0.0.1",
+      "port": 7497,
+      "clientId": 1,
+      "label": "PAPER TRADING (TWS)",
+      "mode": "TEST",
+      "color": "green",
+      "description": "Testovanie stratégií na demo účte cez TWS"
+    },
+    "LIVE": {
+      "host": "127.0.0.1",
+      "port": 7496,
+      "clientId": 0,
+      "label": "LIVE TRADING (TWS)",
+      "mode": "LIVE",
+      "color": "red",
+      "description": "Reálne obchodovanie cez TWS Live (POZOR!)"
+    }
+  },
+  "default_profile": "PAPER"
+}
+

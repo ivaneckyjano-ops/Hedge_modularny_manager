@@ -68,7 +68,7 @@ try:
     from modularny.tab_scenare import create_scenarios_tab
     from modularny.tab_balancer import create_balancer_tab
     from modularny.tab_kalkulator import create_spread_calculator_tab
-    from modularny.tab_optimizer import create_interactive_optimizer_tab
+    from modularny.tab_gamma_scalper import create_gamma_scalper_tab
     from modularny.tab_roll import create_roll_optimizer_tab
     from modularny.utils import parse_option_fetch_output
     MODULAR_AVAILABLE = True
@@ -225,11 +225,11 @@ class HedgeManagerGUI:
         else:
             self.create_spread_calculator_tab(tab2)
         
-        # === TAB 3: Interaktívny Optimizer ===
+        # === TAB 3: Gamma Scalper (New) ===
         tab3 = ttk.Frame(notebook)
-        notebook.add(tab3, text="🔧 Optimizer")
+        notebook.add(tab3, text="🧘 Gamma Scalper")
         if MODULAR_AVAILABLE:
-            create_interactive_optimizer_tab(tab3, self.state)
+            create_gamma_scalper_tab(tab3, self.state)
         else:
             self.create_interactive_optimizer_tab(tab3)
         

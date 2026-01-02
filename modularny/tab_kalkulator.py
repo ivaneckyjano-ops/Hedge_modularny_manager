@@ -930,9 +930,105 @@ def create_spread_calculator_tab(parent, state):
     ttk.Button(btn_row, text="🧮 VYPOČÍTAŤ", command=lambda: calculate_spread(state), 
                style='Accent.TButton').pack(side='left', padx=20)
     
+    ttk.Button(btn_row, text="🔍 Nájsť Strangle", command=lambda: find_strangle_gui(state)).pack(side='left', padx=10)
+
     calc_status_label = ttk.Label(btn_row, text="Pripravené")
     calc_status_label.pack(side='left', padx=20)
     state.calc_status_label = calc_status_label
+
+
+def find_strangle_gui(state):
+    """Spustí vyhľadávanie Long Strangle stratégie"""
+    symbol = state.symbol_var.get()
+    expiry = state.calc_short_expiry_var.get()
+    port = state.port_var.get()
+    
+    if not symbol or not expiry:
+        messagebox.showwarning("Chyba", "Zadajte Symbol a Expiráciu (do Short Expiry poľa)")
+        return
+
+    update_calc_status(state, f"Hľadám Strangle pre {symbol}...")
+    
+    def run():
+        try:
+            script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_strangle_finder.py')
+            # Default target delta 0.30 (možno pridať do GUI neskôr)
+            cmd = ['python3', script_path, '--symbol', symbol, '--expiry', expiry, 
+                   '--delta-target', '0.30', '--port', str(port)]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=30,
+                cwd='/home/narbon/Aplikácie/tws-webapp'
+            )
+            
+            output = result.stdout.strip()
+            stderr = result.stderr.strip()
+            
+            if result.returncode == 0 and output:
+                try:
+                    data = json.loads(output)
+                    if data.get('success'):
+                        call = data['callLeg']
+                        put = data['putLeg']
+                        stats = data['stats']
+                        
+                        # Zobraz výsledok
+                        res_text = f"""
+╔══════════════════════════════════════════════════════════════════╗
+║                 🧘 LONG STRANGLE NÁVRH (Delta Neutral)           ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Symbol: {symbol:10}    Expiry: {expiry:10}                        ║
+║  Cena podkladu: ${stats['underlyingPrice']:.2f}                              ║
+╠══════════════════════════════════════════════════════════════════╣
+║  🟢 CALL LEG (Long):                                             ║
+║     Strike: ${call['strike']:.2f}    Delta: {call['delta']:.3f}    Premium: ${call['mid']:.2f}       ║
+║                                                                  ║
+║  🟢 PUT LEG (Long):                                              ║
+║     Strike: ${put['strike']:.2f}    Delta: {put['delta']:.3f}    Premium: ${put['mid']:.2f}       ║
+╠══════════════════════════════════════════════════════════════════╣
+║  ⚖️  STATS:                                                       ║
+║     Net Delta:   {stats['netDelta']:.3f}  (Cieľ ≈ 0)                        ║
+║     Total Gamma: {stats['totalGamma']:.5f} (Zrýchlenie profitu)              ║
+║     Total Theta: {stats['totalTheta']:.3f} (Denný rozpad)                    ║
+║     Total Cost:  ${stats['totalCost']:.2f} (Max risk)                         ║
+╚══════════════════════════════════════════════════════════════════╝
+
+💡 ODPORÚČANIE:
+Toto je Gamma Scalping štartovacia pozícia.
+1. Zadajte tieto striky do kalkulátora manuálne pre uloženie stratégie.
+2. V "Monitor" záložke sledujte Net Deltu.
+3. Ak Net Delta > 0.20 alebo < -0.20, rolujte ziskovú nohu.
+"""
+                        state.root.after(0, lambda: state.calc_result_text.config(state='normal'))
+                        state.root.after(0, lambda: state.calc_result_text.delete(1.0, tk.END))
+                        state.root.after(0, lambda: state.calc_result_text.insert(tk.END, res_text))
+                        state.root.after(0, lambda: state.calc_result_text.config(state='disabled'))
+                        
+                        # Predvyplň polia kalkulátora pre uloženie (ako Custom Strangle)
+                        state.root.after(0, lambda: state.calc_short_strike_var.set(call['strike'])) # Call -> Short field (hack)
+                        state.root.after(0, lambda: state.calc_short_premium_var.set(call['mid']))
+                        state.root.after(0, lambda: state.calc_long_strike_var.set(put['strike'])) # Put -> Long field
+                        state.root.after(0, lambda: state.calc_long_premium_var.set(put['mid']))
+                        
+                        update_calc_status(state, "✓ Strangle nájdený")
+                    else:
+                        err = data.get('error', 'Neznáma chyba')
+                        state.root.after(0, lambda: messagebox.showerror("Chyba", f"Nenašiel sa vhodný Strangle:\n{err}"))
+                        update_calc_status(state, f"❌ Chyba: {err}")
+                except json.JSONDecodeError:
+                     state.root.after(0, lambda: messagebox.showerror("Chyba", f"Neplatný JSON:\n{output}"))
+            else:
+                err = stderr if stderr else "Neznáma chyba skriptu"
+                state.root.after(0, lambda: messagebox.showerror("Chyba", f"Chyba skriptu:\n{err}"))
+                update_calc_status(state, "❌ Chyba skriptu")
+                
+        except Exception as e:
+            state.root.after(0, lambda: messagebox.showerror("Chyba", f"Výnimka:\n{e}"))
+            update_calc_status(state, f"❌ Výnimka: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+
     
     # === Výsledky výpočtu ===
     result_frame = ttk.LabelFrame(parent, text="📊 Výsledky kalkulácie", padding=10)

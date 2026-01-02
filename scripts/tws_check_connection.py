@@ -15,7 +15,7 @@ def main():
     
     try:
         ib = IB()
-        ib.connect('127.0.0.1', port, clientId=random.randint(1000,9999), readonly=True, timeout=10)
+        ib.connect('127.0.0.1', port, clientId=random.randint(1000,9999), readonly=True, timeout=20)
         
         info = {
             'connected': True,

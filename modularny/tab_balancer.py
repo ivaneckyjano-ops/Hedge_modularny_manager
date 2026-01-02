@@ -393,6 +393,83 @@ def show_symmetry_table(state):
     info_label.pack(fill="x", pady=(0, 10))
 
 
+def mark_opposite_manual_override(state, event=None):
+    """Označí riadok 2 ako manuálne upravený, aby sa jeho hodnoty neprepísali."""
+    if getattr(state, 'bal_opposite_internal_update', False):
+        return
+    if not getattr(state, 'bal_opposite_manual_override', False):
+        state.bal_opposite_manual_override = True
+        if hasattr(state, 'bal_status_label'):
+            state.bal_status_label.config(text="✎ Riadok 2 upravený manuálne – analýza nebude prepísať hodnoty")
+
+
+def reset_opposite_row2_to_computed(state):
+    """Vráti riadok 2 k posledným vypočítaným hodnotám."""
+    if not getattr(state, 'bal_last_analysis', None):
+        messagebox.showinfo("Reset riadku 2", "Najprv spustite analýzu, aby boli k dispozícii vypočítané hodnoty.")
+        return
+    opp = state.bal_last_analysis.get('opposite', {})
+    strike = opp.get('strike')
+    premium = opp.get('premium')
+    state.bal_opposite_manual_override = False
+    set_opposite_row_values(state, strike=strike, premium=premium)
+    if hasattr(state, 'bal_status_label'):
+        state.bal_status_label.config(text="↺ Riadok 2 resetnutý na vypočítané hodnoty")
+
+
+def _format_opposite_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def set_opposite_row_values(state, strike=None, premium=None):
+    """Nastaví strike/premium v riadku 2 bez spustenia manuálneho override."""
+    state.bal_opposite_internal_update = True
+    try:
+        if strike is not None:
+            formatted = _format_opposite_value(strike)
+            state.bal_opposite_strike_var.set(formatted)
+        if premium is not None:
+            formatted = _format_opposite_value(premium)
+            state.bal_opposite_premium_var.set(formatted)
+    finally:
+        state.bal_opposite_internal_update = False
+
+def _try_parse_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def resolve_opposite_values(state, computed_strike, computed_premium):
+    """Vráti hodnoty z riadku 2, uprednostní ručné zadanie ak je platné."""
+    strike = computed_strike
+    premium = computed_premium
+    manual_used = False
+    manual_strike_used = False
+    manual_premium_used = False
+    if getattr(state, 'bal_opposite_manual_override', False):
+        manual_strike = _try_parse_float(state.bal_opposite_strike_var.get())
+        if manual_strike is not None:
+            strike = manual_strike
+            manual_used = True
+            manual_strike_used = True
+        manual_premium = _try_parse_float(state.bal_opposite_premium_var.get())
+        if manual_premium is not None:
+            premium = manual_premium
+            manual_used = True
+            manual_premium_used = True
+    strike = strike if strike is not None else computed_strike
+    premium = premium if premium is not None else computed_premium
+    return strike, premium, manual_used, manual_strike_used, manual_premium_used
+
+
 def bal_load_from_calculator(state):
     """Načíta LONG leg z Kalkulátora - používa AKTUÁLNE hodnoty"""
     print("=" * 60, flush=True)
@@ -465,6 +542,8 @@ def bal_load_from_calculator(state):
         print(f"  bal_opposite_type_var: {state.bal_opposite_type_var.get()}", flush=True)
         
         # Automaticky spusti analýzu
+        # Reset manual override - načítané nové dáta by mali prepísať riadok 2
+        state.bal_opposite_manual_override = False
         print("DEBUG: Spúšťam analyze_balancer...", flush=True)
         analyze_balancer(state)
         print("DEBUG bal_load_from_calculator: END", flush=True)
@@ -631,11 +710,19 @@ def analyze_balancer(state):
             else:
                 opp_premium = black_scholes_put_price(underlying, balanced_strike, T, r, iv)
             
-            if opp_premium < 0.05:
-                opp_premium = long_premium * 0.9
-                print(f"DEBUG: Používam odhadovanú hodnotu: ${opp_premium:.2f} (90% z long premium)", flush=True)
-            else:
-                print(f"DEBUG: Používam Black-Scholes: ${opp_premium:.2f}", flush=True)
+        if opp_premium < 0.05:
+            opp_premium = long_premium * 0.9
+            print(f"DEBUG: Používam odhadovanú hodnotu: ${opp_premium:.2f} (90% z long premium)", flush=True)
+        else:
+            print(f"DEBUG: Používam Black-Scholes: ${opp_premium:.2f}", flush=True)
+
+        applied_strike, applied_premium, manual_used, manual_strike_used, manual_premium_used = resolve_opposite_values(
+            state, balanced_strike, opp_premium
+        )
+        if manual_used:
+            print(f"DEBUG: Ručne zadané hodnoty pre riadok 2 použité (strike={applied_strike}, premium={applied_premium})", flush=True)
+        else:
+            set_opposite_row_values(state, strike=balanced_strike, premium=opp_premium)
         
         # P/L výpočet pre LONG opcie:
         # P/L = (aktuálna_cena - zaplatené_premium) × 100
@@ -671,33 +758,35 @@ def analyze_balancer(state):
         print(f"DEBUG P/L long: premium_paid={long_premium:.2f}, current_value={long_current_price:.2f}, pl={pl_long:.2f}", flush=True)
         
         # Pre druhú LONG opciu
-        opp_current_price = opp_premium
+        opp_current_price = applied_premium
         if opp_current_price < 0.01:
             if opp_type == 'CALL':
-                opp_current_price = max(0, underlying - balanced_strike)
+                opp_current_price = max(0, underlying - applied_strike)
             else:
-                opp_current_price = max(0, balanced_strike - underlying)
+                opp_current_price = max(0, applied_strike - underlying)
         
-        pl_opp = (opp_current_price - opp_premium) * 100
+        pl_opp = (opp_current_price - applied_premium) * 100
         total_pl = pl_long + pl_opp
         
         print(f"DEBUG P/L: long_current={long_current_price:.2f}, pl_long={pl_long:.2f}", flush=True)
         print(f"DEBUG P/L: opp_current={opp_current_price:.2f}, pl_opp={pl_opp:.2f}, total={total_pl:.2f}", flush=True)
         
         # Celkový náklad strangle
-        total_cost = long_premium + opp_premium
+        total_cost = long_premium + applied_premium
         
         # Break-even body
         if long_type == 'PUT':
             # PUT strike - total_cost a CALL strike + total_cost
             be_down = long_strike - total_cost
-            be_up = balanced_strike + total_cost
+            be_up = applied_strike + total_cost
         else:
             # CALL strike + total_cost a PUT strike - total_cost
             be_up = long_strike + total_cost
-            be_down = balanced_strike - total_cost
+            be_down = applied_strike - total_cost
         
         # Zobraz výsledky
+        strike_note = "manuálne" if manual_strike_used else "symetricky"
+        premium_note = "manuálne" if manual_premium_used else "odhadovaná / TWS"
         result_text = f"""
 ╔══════════════════════════════════════════════════════════════════╗
 ║                    📊 BALANCER ANALÝZA                            ║
@@ -712,11 +801,11 @@ def analyze_balancer(state):
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Riadok 2: LONG {opp_type:4} (vypočítaný pre vyvážený strangle)        ║
 ║  ──────────────────────────────────────────────────────────────── ║
-║  Strike:     ${balanced_strike:>8.2f} (symetricky)                          ║
-║  Premium:    ${opp_premium:>8.2f} (odhadovaná / TWS)                         ║
+║  Strike:     ${applied_strike:>8.2f} ({strike_note})                          ║
+║  Premium:    ${applied_premium:>8.2f} ({premium_note})                         ║
 ║  Aktuálna cena: ${opp_current_price:>8.2f} (z TWS / odhad)                   ║
 ║  Expiry:     {expiry:>10} (rovnaká)                                    ║
-║  P/L @ ${underlying:.2f}:  ${pl_opp:>8.2f}  (= ({opp_current_price:.2f} - {opp_premium:.2f}) × 100)    ║
+║  P/L @ ${underlying:.2f}:  ${pl_opp:>8.2f}  (= ({opp_current_price:.2f} - {applied_premium:.2f}) × 100)    ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  STRANGLE POZÍCIA:                                               ║
 ║  ──────────────────────────────────────────────────────────────── ║
@@ -743,16 +832,18 @@ def analyze_balancer(state):
             state.bal_results_text.insert(tk.END, result_text)
         
         if hasattr(state, 'bal_status_label'):
-            state.bal_status_label.config(text=f"✓ Analýza hotová | Balanced strike: ${balanced_strike:.2f}")
+            suffix = " (manuálne)" if manual_used else ""
+            state.bal_status_label.config(
+                text=f"✓ Analýza hotová | Strike: ${applied_strike:.2f}{suffix}"
+            )
         
         # Ulož výsledky - strike sa automaticky zobrazí v riadku 2 (strangle princíp)
         strike_str = f"{balanced_strike:.2f}"
         premium_str = f"{opp_premium:.2f}"
         print(f"DEBUG: Nastavujem strike={strike_str}, premium={premium_str}", flush=True)
         
-        # Nastav hodnoty do StringVar
-        state.bal_opposite_strike_var.set(strike_str)
-        state.bal_opposite_premium_var.set(premium_str)
+        if getattr(state, 'bal_opposite_manual_override', False):
+            print("DEBUG: Manuálna úprava riadku 2 zachovaná, analýza neprepíše hodnoty", flush=True)
         
         # Aktualizuj UI - uisti sa, že strike je viditeľný
         state.root.update_idletasks()
@@ -762,14 +853,15 @@ def analyze_balancer(state):
         print(f"DEBUG: Strike po nastavení: '{actual_strike}' (dĺžka: {len(actual_strike) if actual_strike else 0})", flush=True)
         
         # Skontroluj, či Entry widget existuje a má správnu hodnotu
-        if hasattr(state, 'bal_opposite_strike_entry'):
-            entry_value = state.bal_opposite_strike_entry.get()
-            print(f"DEBUG: Entry widget hodnota: '{entry_value}'", flush=True)
-            if entry_value != strike_str:
-                print(f"WARNING: Entry widget hodnota sa nezhoduje! Očakávané: '{strike_str}', Skutočné: '{entry_value}'", flush=True)
-                # Vynúť aktualizáciu
-                state.bal_opposite_strike_entry.delete(0, tk.END)
-                state.bal_opposite_strike_entry.insert(0, strike_str)
+        if not getattr(state, 'bal_opposite_manual_override', False):
+            if hasattr(state, 'bal_opposite_strike_entry'):
+                entry_value = state.bal_opposite_strike_entry.get()
+                print(f"DEBUG: Entry widget hodnota: '{entry_value}'", flush=True)
+                if entry_value != strike_str:
+                    print(f"WARNING: Entry widget hodnota sa nezhoduje! Očakávané: '{strike_str}', Skutočné: '{entry_value}'", flush=True)
+                    # Vynúť aktualizáciu
+                    state.bal_opposite_strike_entry.delete(0, tk.END)
+                    state.bal_opposite_strike_entry.insert(0, strike_str)
         
         if not actual_strike or actual_strike.strip() == '':
             print(f"ERROR: Strike sa nenastavil! balanced_strike={balanced_strike}, strike_str={strike_str}", flush=True)
@@ -782,9 +874,14 @@ def analyze_balancer(state):
             },
             'opposite': {
                 'type': opp_type,
-                'strike': balanced_strike,
-                'premium': opp_premium,
-                'expiry': expiry
+                'strike': applied_strike,
+                'premium': applied_premium,
+                'expiry': expiry,
+                'computed_strike': balanced_strike,
+                'computed_premium': opp_premium,
+                'manual_override': manual_used,
+                'manual_strike_used': manual_strike_used,
+                'manual_premium_used': manual_premium_used
             },
             'underlying': underlying,
             'iv': iv,
@@ -1159,12 +1256,18 @@ def create_balancer_tab(parent, state):
     ttk.Label(opp_row1, text="(vypočítaný pre balancovanie)", foreground='blue', font=('TkDefaultFont', 9, 'bold')).pack(side='left', padx=2)
     
     ttk.Label(opp_row1, text="Premium $:").pack(side='left', padx=5)
-    ttk.Entry(opp_row1, textvariable=state.bal_opposite_premium_var, width=8).pack(side='left', padx=5)
+    premium_entry = ttk.Entry(opp_row1, textvariable=state.bal_opposite_premium_var, width=8)
+    premium_entry.pack(side='left', padx=5)
+
+    # Trace pre detekciu manuálnych zmien
+    state.bal_opposite_strike_var.trace_add('write', lambda *args: mark_opposite_manual_override(state))
+    state.bal_opposite_premium_var.trace_add('write', lambda *args: mark_opposite_manual_override(state))
     ttk.Label(opp_row1, text="Theta $:").pack(side='left', padx=5)
     opp_theta_entry = ttk.Entry(opp_row1, textvariable=state.bal_opposite_theta_var, width=8)
     opp_theta_entry.pack(side='left', padx=5)
     state.bal_opposite_theta_entry = opp_theta_entry
     ttk.Button(opp_row1, text="📥 Stiahnuť presnú cenu", command=lambda: fetch_balancer_option_price(state)).pack(side='left', padx=10)
+    ttk.Button(opp_row1, text="↺ Reset riadku 2", command=lambda: reset_opposite_row2_to_computed(state)).pack(side='left', padx=5)
     
     ttk.Label(opp_row1, text="Expiry:").pack(side='left', padx=5)
     ttk.Label(opp_row1, textvariable=state.bal_long_expiry_var, width=12).pack(side='left', padx=5)
