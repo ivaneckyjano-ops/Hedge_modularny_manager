@@ -17,9 +17,10 @@ class SharedState:
     def __init__(self, root):
         self.root = root
         
-        # Archív nastavení
-        self.settings_file = '/home/narbon/Aplikácie/tws-webapp/settings_archive.json'
-        self.profiles_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'profiles.json')
+        # Archív nastavení - upravená cesta na aktuálny projekt
+        BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+        self.settings_file = os.path.join(BASE_DIR, 'settings_archive.json')
+        self.profiles_file = os.path.join(BASE_DIR, 'config', 'profiles.json')
         self.saved_strategies = {}
         self.saved_gamma_scalper_strategies = {}
         self.saved_gamma_semafor_configs = {} 
@@ -68,6 +69,9 @@ class SharedState:
         self.vix_value = None
         self._gamma_status_info = {}
         
+        # Pre position monitor
+        self.monitor_selected_symbols = {} # Slovník {symbol: tk.BooleanVar}
+        
         # Pre Margin Optimizer
         self.broker_var = tk.StringVar(value="IBKR")
         self.max_margin_var = tk.StringVar(value="5000")
@@ -82,14 +86,24 @@ class SharedState:
         self.gs_semafor_config_notes_var = tk.StringVar() # Poznámky pre konfiguráciu Semafora
         self.gs_search_process = None # Pre uloženie referencie na spustený proces vyhľadávania
         self.gs_auto_monitor_var = tk.BooleanVar(value=False) # Automatické sledovanie pozícií
+        self.gs_auto_scalp_var = tk.BooleanVar(value=False) # Automatické rebalansovanie akciami (Full Auto)
+        self.gs_drift_tol = tk.StringVar(value="0.20") # Tolerancia driftu pre Gamma Scalper
+        self.gs_target_delta_pos_var = tk.StringVar(value="0.00") # Cieľová delta pozície (0.0=neutral, >0=long, <0=short)
+        self.gs_manual_call_strike_var = tk.StringVar(value="")
+        self.gs_manual_put_strike_var = tk.StringVar(value="")
 
-        # Gamma Semafor nastavenia (defaultné hodnoty)
+        # Archív konzultácií
+        self.consultations_file = os.path.join(BASE_DIR, 'consultations.json')
+        self.consultations = []
+        self.load_consultations()
+
+        # Gamma Semafor nastavenia (prísne - Exit pod 3.0)
         self.gamma_semafor_thresholds = {
-            "strong_buy": 0.15,
-            "buy": 0.08,
-            "neutral": 0.04,
-            "stop": 0.02,
-            "strong_stop": 0.00 # Hodnota pod ktorou je silný stop, nemusí byť použiteľná ako prah
+            "strong_buy": 6.00,
+            "buy": 4.50,
+            "neutral": 3.00,
+            "stop": 1.50,
+            "strong_stop": 0.00
         }
 
         # Premenné pre GUI Semaforu
@@ -166,6 +180,9 @@ class SharedState:
         self.roll_underlying_var = tk.StringVar()
         self.roll_total_invested_var = tk.StringVar(value="0")
         self.roll_received_credit_var = tk.StringVar(value="0")
+        
+        # Monitor - vybrané symboly na hedžovanie
+        self.monitor_selected_symbols = {} # Slovník sym -> tk.BooleanVar
         
         # Status bar widgets (budú nastavené v create_status_bar)
         self.conn_indicator = None
@@ -319,6 +336,22 @@ class SharedState:
                 self.root.after(0, lambda: self._refresh_gamma_status_label())
 
         threading.Thread(target=run, daemon=True).start()
+
+    def get_earnings_date(self, symbol):
+        """Získa dátum najbližších výsledkov (Earnings) pre daný symbol"""
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            calendar = ticker.calendar
+            if calendar is not None and not calendar.empty:
+                # calendar['Earnings Date'] vracia zoznam dátumov (začiatok a koniec okna)
+                # Zoberieme ten prvý
+                e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
+                if e_dates is not None and len(e_dates) > 0:
+                    return e_dates[0]
+            return None
+        except:
+            return None
     
     def check_connection(self):
         """Otestuje pripojenie k TWS"""
@@ -383,21 +416,35 @@ class SharedState:
         # Zobraz status
         if hasattr(self, 'calc_status_label'):
             self.calc_status_label.config(text="Načítavam expirácie z TWS...")
-        
+            
+        # Progress Bar
+        if hasattr(self, 'gs_scan_progress'):
+            self.gs_scan_progress.pack(fill='x', pady=(5, 0))
+            self.gs_scan_progress['maximum'] = 100
+            self.gs_scan_progress['value'] = 0
+            def fake_progress(current=0):
+                if self.gs_scan_progress.winfo_exists() and self.gs_scan_progress.winfo_ismapped():
+                    if current < 90:
+                        self.gs_scan_progress['value'] = current
+                        self.root.after(200, lambda: fake_progress(current + 5))
+            fake_progress()
+
         def run():
             try:
                 script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_load_expiries.py')
-                print(f"DEBUG: Spúšťam skript: {script_path}")
-                print(f"DEBUG: Príkaz: python3 {script_path} {port} {symbol} {right}")
-                
-                # Timeout 60 sekúnd
+                # ...
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, right], 
                     capture_output=True, text=True, timeout=60,
                     cwd='/home/narbon/Aplikácie/tws-webapp'
                 )
                 
+                # Skryť progress bar
+                self.root.after(0, lambda: self.gs_scan_progress.pack_forget() if hasattr(self, 'gs_scan_progress') else None)
+                
                 print(f"DEBUG: returncode={result.returncode}")
+                # ...
+
                 print(f"DEBUG: stdout={result.stdout[:200] if result.stdout else 'None'}")
                 print(f"DEBUG: stderr={result.stderr[:200] if result.stderr else 'None'}")
                 
@@ -438,6 +485,7 @@ class SharedState:
                 print("DEBUG: Timeout!")
                 self.root.after(0, lambda: self.handle_expiry_error("Timeout - TWS neodpovedá (skúste to znova)"))
             except Exception as e:
+                self.root.after(0, lambda: self.gs_scan_progress.pack_forget() if hasattr(self, 'gs_scan_progress') else None)
                 print(f"DEBUG: Exception: {e}")
                 import traceback
                 traceback.print_exc()
@@ -492,6 +540,31 @@ class SharedState:
         if hasattr(self, 'calc_status_label'):
             self.calc_status_label.config(text=f"✓ Načítaných {len(expiries)} expirácií")
     
+    def load_consultations(self):
+        """Načíta históriu konzultácií"""
+        try:
+            if os.path.exists(self.consultations_file):
+                with open(self.consultations_file, 'r', encoding='utf-8') as f:
+                    self.consultations = json.load(f)
+            else:
+                self.consultations = []
+        except:
+            self.consultations = []
+
+    def save_consultation(self, user_text, ai_response):
+        """Uloží novú konzultáciu do histórie"""
+        entry = {
+            'timestamp': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+            'user': user_text,
+            'ai': ai_response
+        }
+        self.consultations.append(entry)
+        try:
+            with open(self.consultations_file, 'w', encoding='utf-8') as f:
+                json.dump(self.consultations, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Chyba pri ukladaní konzultácie: {e}")
+
     def load_settings_file(self):
         """Načíta archív nastavení zo súboru"""
         try:
@@ -530,6 +603,12 @@ class SharedState:
 
                     self.gs_model_priority_var.set(data.get('gs_model_priority', False))
 
+                    # Načítaj uložené vybrané symboly pre monitor
+                    loaded_selected_symbols = data.get('monitor_selected_symbols', [])
+                    self.monitor_selected_symbols = {}
+                    for sym in loaded_selected_symbols:
+                        self.monitor_selected_symbols[sym] = tk.BooleanVar(value=True)
+
             else:
                 self.saved_strategies = {}
                 # Nastav default hodnoty aj pre Semafor a model priority ak súbor neexistuje
@@ -558,7 +637,8 @@ class SharedState:
                 'gamma_semafor_configs': self.saved_gamma_semafor_configs,
                 'ticker_settings': self.ticker_settings, # Uložíme nastavenia tickerov
                 'default_gamma_semafor_config': self.gs_semafor_config_name_var.get(), # Uložíme poslednú použitú
-                'gs_model_priority': self.gs_model_priority_var.get()
+                'gs_model_priority': self.gs_model_priority_var.get(),
+                'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()]
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -742,10 +822,13 @@ class SharedState:
                 return
             name = name.strip()
         
+        # Získame poznámku, ak bola nastavená v GUI (current_gs_note)
+        note = getattr(self, 'current_gs_note', self.gs_strategy_notes_var.get())
+        
         try:
             strategy = {
                 'symbol': self.symbol_var.get(),
-                'expiry': self.gs_expiry_combo.get(),
+                'expiry': self.gs_expiry_combo.get() if hasattr(self, 'gs_expiry_combo') else self.calc_short_expiry_var.get(),
                 'target_delta': self.gs_target_delta_var.get(),
                 'iv': self.iv_var.get(),
                 'rate': self.rate_var.get(),
@@ -755,9 +838,9 @@ class SharedState:
                 'gs_neutral_threshold': self.gs_neutral_threshold_var.get(),
                 'gs_stop_threshold': self.gs_stop_threshold_var.get(),
                 'gs_model_priority': self.gs_model_priority_var.get(),
-                'gs_drift_tolerance': self.gs_drift_tol.get(), # Uložíme aj toleranciu driftu
-                'notes': self.gs_strategy_notes_var.get(), # Uložíme poznámku
-                'analysis_text': self.gs_result_text.get(1.0, tk.END) if hasattr(self, 'gs_result_text') else "", # Uložíme aj výsledok analýzy
+                'gs_drift_tolerance': self.gs_drift_tol.get(),
+                'notes': note, # Uložíme poznámku
+                'analysis_text': self.gs_result_text.get(1.0, tk.END) if hasattr(self, 'gs_result_text') else "",
                 'saved_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
@@ -769,7 +852,9 @@ class SharedState:
                 strategy_combo['values'] = strategy_names
             
             self.save_settings_file()
-            messagebox.showinfo("Úspech", f"Stratégia Gamma Scalper '{name}' bola uložená.\n\nCelkom stratégií: {len(self.saved_gamma_scalper_strategies)}")
+            # Vyčistíme dočasnú poznámku
+            self.current_gs_note = ""
+            # Odstránené duplicitné messagebox.showinfo, rieši si to volajúca funkcia v GUI
             
         except Exception as e:
             messagebox.showerror("Chyba", f"Nepodarilo sa uložiť stratégiu Gamma Scalper:\n{e}")
@@ -899,4 +984,3 @@ class SharedState:
             messagebox.showinfo("Vyhľadávanie už skončilo", "Vyhľadávanie už bolo ukončené alebo skončilo samo.")
         else:
             messagebox.showinfo("Žiadne vyhľadávanie", "Momentálne neprebieha žiadne vyhľadávanie Strangle.")
-

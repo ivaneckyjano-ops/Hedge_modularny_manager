@@ -21,7 +21,6 @@ def create_drift_manager_tab(parent, state):
     ttk.Label(row1, text="Symbol:").pack(side='left', padx=5)
     symbol_entry = ttk.Entry(row1, width=10)
     symbol_entry.pack(side='left', padx=5)
-    # Defaultne nastavíme aktuálny symbol zo state
     symbol_entry.insert(0, state.symbol_var.get())
 
     ttk.Label(row1, text="Opt. Drift Tol:").pack(side='left', padx=10)
@@ -29,9 +28,17 @@ def create_drift_manager_tab(parent, state):
     drift_tol_entry.pack(side='left', padx=5)
     drift_tol_entry.insert(0, "0.15")
 
-    ttk.Label(row1, text="Poznámka:").pack(side='left', padx=10)
-    note_entry = ttk.Entry(row1, width=40)
-    note_entry.pack(side='left', padx=5)
+    ttk.Label(row1, text="Cieľová Δ:").pack(side='left', padx=10)
+    target_delta_entry = ttk.Entry(row1, width=8)
+    target_delta_entry.pack(side='left', padx=5)
+    target_delta_entry.insert(0, "0.00")
+
+    row2 = ttk.Frame(edit_frame)
+    row2.pack(fill='x', pady=5)
+
+    ttk.Label(row2, text="Poznámka:").pack(side='left', padx=5)
+    note_entry = ttk.Entry(row2)
+    note_entry.pack(side='left', padx=5, fill='x', expand=True)
 
     def save_ticker_settings():
         sym = symbol_entry.get().strip().upper()
@@ -40,9 +47,11 @@ def create_drift_manager_tab(parent, state):
             return
         
         try:
-            tol = float(drift_tol_entry.get())
+            tol = float(drift_tol_entry.get().replace(',', '.'))
+            t_delta = float(target_delta_entry.get().replace(',', '.'))
             state.ticker_settings[sym] = {
                 'drift_tolerance': tol,
+                'target_delta': t_delta,
                 'note': note_entry.get().strip(),
                 'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M')
             }
@@ -50,25 +59,27 @@ def create_drift_manager_tab(parent, state):
             refresh_tree()
             messagebox.showinfo("Uložené", f"Nastavenia pre {sym} boli uložené.")
         except ValueError:
-            messagebox.showerror("Chyba", "Tolerancia musí byť číslo.")
+            messagebox.showerror("Chyba", "Tolerancia a Delta musia byť čísla.")
 
-    ttk.Button(row1, text="💾 Uložiť", command=save_ticker_settings).pack(side='left', padx=20)
+    ttk.Button(row2, text="💾 ULOŽIŤ NASTAVENIA", command=save_ticker_settings, style='Accent.TButton').pack(side='right', padx=10)
 
     # === 2. ZOZNAM TICKEROV ===
     tree_frame = ttk.LabelFrame(frame, text="📋 Archív osvedčených nastavení", padding=10)
     tree_frame.pack(fill='both', expand=True)
 
-    columns = ('symbol', 'tol', 'note', 'updated')
+    columns = ('symbol', 'tol', 'target_delta', 'note', 'updated')
     tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
     tree.heading('symbol', text='Ticker')
     tree.heading('tol', text='Opt. Drift')
+    tree.heading('target_delta', text='Cieľová Δ')
     tree.heading('note', text='Poznámka')
     tree.heading('updated', text='Aktualizované')
 
     tree.column('symbol', width=80, anchor='center')
-    tree.column('tol', width=100, anchor='center')
-    tree.column('note', width=300)
-    tree.column('updated', width=150, anchor='center')
+    tree.column('tol', width=80, anchor='center')
+    tree.column('target_delta', width=80, anchor='center')
+    tree.column('note', width=250)
+    tree.column('updated', width=130, anchor='center')
 
     scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=scrollbar.set)
@@ -82,6 +93,7 @@ def create_drift_manager_tab(parent, state):
             tree.insert('', tk.END, values=(
                 sym, 
                 f"{d.get('drift_tolerance', 0.15):.2f}",
+                f"{d.get('target_delta', 0.00):.2f}",
                 d.get('note', ''),
                 d.get('updated_at', '')
             ))
@@ -94,8 +106,10 @@ def create_drift_manager_tab(parent, state):
             symbol_entry.insert(0, vals[0])
             drift_tol_entry.delete(0, tk.END)
             drift_tol_entry.insert(0, vals[1])
+            target_delta_entry.delete(0, tk.END)
+            target_delta_entry.insert(0, vals[2])
             note_entry.delete(0, tk.END)
-            note_entry.insert(0, vals[2])
+            note_entry.insert(0, vals[3])
 
     tree.bind('<<TreeviewSelect>>', on_select)
 
@@ -114,4 +128,6 @@ def create_drift_manager_tab(parent, state):
     refresh_tree()
     # Exponujeme funkciu na refresh pre prípadné volanie odinakiaľ
     state.refresh_drift_manager_tree = refresh_tree
+
+
 

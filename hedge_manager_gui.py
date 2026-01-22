@@ -210,73 +210,99 @@ class HedgeManagerGUI:
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # === TAB 1: Connection ===
-        tab1 = ttk.Frame(notebook)
-        notebook.add(tab1, text="🔌 Pripojenie")
+        # === TAB 1: Pripojenie ===
+        tab_conn = ttk.Frame(notebook)
+        notebook.add(tab_conn, text="🔌 Pripojenie")
         if MODULAR_AVAILABLE:
-            create_connection_tab(tab1, self.state)
+            create_connection_tab(tab_conn, self.state)
         else:
-            self.create_connection_tab(tab1)
+            self.create_connection_tab(tab_conn)
         
-        # === TAB 2: Spread Kalkulátor ===
-        tab2 = ttk.Frame(notebook)
-        notebook.add(tab2, text="🧮 Kalkulátor")
+        # === TAB 2: Opčný Kalkulátor (NESTED) ===
+        tab_calc_root = ttk.Frame(notebook)
+        notebook.add(tab_calc_root, text="🧮 Opčný Kalkulátor")
+        
+        calc_notebook = ttk.Notebook(tab_calc_root)
+        calc_notebook.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # 2.1 Kalkulátor
+        tab_calc = ttk.Frame(calc_notebook)
+        calc_notebook.add(tab_calc, text="🧮 Kalkulátor")
         if MODULAR_AVAILABLE:
-            create_spread_calculator_tab(tab2, self.state)
+            create_spread_calculator_tab(tab_calc, self.state)
         else:
-            self.create_spread_calculator_tab(tab2)
-        
-        # === TAB 3: Gamma Scalper (New) ===
-        tab3 = ttk.Frame(notebook)
-        notebook.add(tab3, text="🧘 Gamma Scalper")
-        if MODULAR_AVAILABLE:
-            create_gamma_scalper_tab(tab3, self.state)
+            self.create_spread_calculator_tab(tab_calc)
             
-            tab_drift = ttk.Frame(notebook)
-            notebook.add(tab_drift, text="🎯 Správca Driftu")
+        # 2.2 Balancer
+        tab_bal = ttk.Frame(calc_notebook)
+        calc_notebook.add(tab_bal, text="⚖️ Balancer")
+        if MODULAR_AVAILABLE:
+            create_balancer_tab(tab_bal, self.state)
+        else:
+            self.create_balancer_tab(tab_bal)
+            
+        # 2.3 Scenáre
+        tab_scen = ttk.Frame(calc_notebook)
+        calc_notebook.add(tab_scen, text="📈 Scenáre")
+        if MODULAR_AVAILABLE:
+            create_scenarios_tab(tab_scen, self.state)
+        else:
+            self.create_scenarios_tab(tab_scen)
+            
+        # 2.4 Roll Optimizer
+        tab_roll = ttk.Frame(calc_notebook)
+        calc_notebook.add(tab_roll, text="🔄 Roll Optimizer")
+        if MODULAR_AVAILABLE:
+            create_roll_optimizer_tab(tab_roll, self.state)
+        else:
+            self.create_roll_optimizer_tab(tab_roll)
+            
+        # 2.5 Archív
+        tab_arch = ttk.Frame(calc_notebook)
+        calc_notebook.add(tab_arch, text="📁 Archív")
+        if MODULAR_AVAILABLE:
+            create_archive_tab(tab_arch, self.state)
+        else:
+            self.create_archive_tab(tab_arch)
+
+        # === TAB 3: Gamma Scalper (NESTED) ===
+        tab_gs_root = ttk.Frame(notebook)
+        notebook.add(tab_gs_root, text="🧘 Gamma Scalper")
+        
+        gs_notebook = ttk.Notebook(tab_gs_root)
+        gs_notebook.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Pre Gamma Scalper musíme upraviť tab_gamma_scalper.py, aby vedel pracovať s viacerými pod-záložkami
+        # Zatiaľ ho vložíme ako celok, ale pripravíme štruktúru
+        tab_gs_main = ttk.Frame(gs_notebook)
+        gs_notebook.add(tab_gs_main, text="🧘 Stratégia & Monitor")
+        if MODULAR_AVAILABLE:
+            create_gamma_scalper_tab(tab_gs_main, self.state)
+            
+            # 3.2 Správca Driftu
+            tab_drift = ttk.Frame(gs_notebook)
+            gs_notebook.add(tab_drift, text="🎯 Správca Driftu")
             create_drift_manager_tab(tab_drift, self.state)
-        else:
-            self.create_interactive_optimizer_tab(tab3)
         
-        # === TAB 3.5: Balancer ===
-        tab3b = ttk.Frame(notebook)
-        notebook.add(tab3b, text="⚖️ Balancer")
+        # === TAB 4: Portfolio Monitor ===
+        tab_port = ttk.Frame(notebook)
+        notebook.add(tab_port, text="📊 Monitor Portfólia")
         if MODULAR_AVAILABLE:
-            create_balancer_tab(tab3b, self.state)
+            try:
+                # Vynútiť zobrazenie novej verzie
+                import importlib
+                import modularny.tab_monitor
+                importlib.reload(modularny.tab_monitor)
+                from modularny.tab_monitor import create_monitor_tab
+                create_monitor_tab(tab_port, self.state)
+            except Exception as e:
+                import traceback
+                error_msg = f"Chyba pri načítaní monitora: {e}\n{traceback.format_exc()}"
+                lbl = tk.Label(tab_port, text=error_msg, fg="red", justify="left")
+                lbl.pack(padx=20, pady=20)
+                print(error_msg)
         else:
-            self.create_balancer_tab(tab3b)
-        
-        # === TAB 4: Scenáre ===
-        tab4 = ttk.Frame(notebook)
-        notebook.add(tab4, text="📈 Scenáre")
-        if MODULAR_AVAILABLE:
-            create_scenarios_tab(tab4, self.state)
-        else:
-            self.create_scenarios_tab(tab4)
-        
-        # === TAB 5: Position Monitor ===
-        tab5 = ttk.Frame(notebook)
-        notebook.add(tab5, text="👁️ Monitor")
-        if MODULAR_AVAILABLE:
-            create_monitor_tab(tab5, self.state)
-        else:
-            self.create_monitor_tab(tab5)
-        
-        # === TAB 6: Roll Optimizer ===
-        tab6 = ttk.Frame(notebook)
-        notebook.add(tab6, text="🔄 Roll Optimizer")
-        if MODULAR_AVAILABLE:
-            create_roll_optimizer_tab(tab6, self.state)
-        else:
-            self.create_roll_optimizer_tab(tab6)
-        
-        # === TAB 7: Archív Stratégií ===
-        tab7 = ttk.Frame(notebook)
-        notebook.add(tab7, text="📁 Archív")
-        if MODULAR_AVAILABLE:
-            create_archive_tab(tab7, self.state)
-        else:
-            self.create_archive_tab(tab7)
+            self.create_monitor_tab(tab_port)
     
     def create_find_hedge_tab(self, parent):
         """Záložka pre hľadanie nového hedge"""

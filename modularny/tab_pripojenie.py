@@ -143,4 +143,3 @@ def safe_load_expiries(state):
     state.load_expiries()
     # Povolíme tlačidlo až po 10s (load expiries trvá dlhšie)
     state.root.after(10000, lambda: state.btn_load_expiries.config(state='normal'))
-

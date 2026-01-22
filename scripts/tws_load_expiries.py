@@ -126,6 +126,8 @@ def main():
         
         # Získaj expirácie z details
         expiries_raw = []
+        now_date_str = datetime.now().strftime('%Y%m%d')
+        
         for d in details:
             expiry = d.contract.lastTradeDateOrContractMonth
             if expiry:
@@ -143,6 +145,10 @@ def main():
                     continue
                 
                 if expiry_str.isdigit() and len(expiry_str) == 8:
+                    # Filter pre minulosť
+                    if expiry_str < now_date_str:
+                        continue
+                        
                     year = int(expiry_str[:4])
                     month = int(expiry_str[4:6])
                     day = int(expiry_str[6:8])
