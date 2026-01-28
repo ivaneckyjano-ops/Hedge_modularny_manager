@@ -86,14 +86,33 @@ def main():
             print(json.dumps({'connected': ib.isConnected(), 'mode': 'account', 'accountValues': out}))
         else:
             out = []
-            positions = ib.positions()
+            # Použijeme ib.portfolio() namiesto ib.positions(), pretože obsahuje avgCost a unrealizedPNL
+            portfolio_items = ib.portfolio()
+            
+            # Ak je portfolio prázdne (napr. čerstvý štart), skúsime aspoň positions
+            if not portfolio_items:
+                positions = ib.positions()
+                # Prevedieme positions na pseudo-portfolio formát
+                portfolio_items = []
+                for p in positions:
+                    portfolio_items.append(type('Item', (), {
+                        'contract': p.contract,
+                        'position': p.position,
+                        'marketPrice': 0.0,
+                        'averageCost': getattr(p, 'avgCost', 0.0),
+                        'marketValue': 0.0,
+                        'unrealizedPNL': 0.0,
+                        'realizedPNL': 0.0
+                    }))
+
             underlying_prices = {}
             avg_ivs = {}
             unique_symbols = set()
-            for p in positions:
+            for p in portfolio_items:
                 if p.contract.secType in ('OPT', 'BAG', 'STK'):
                     unique_symbols.add(p.contract.symbol)
             
+            # Získanie cien podkladu (kvôli Greeks)
             for sym in unique_symbols:
                 stk = Stock(sym, 'SMART', 'USD')
                 ib.qualifyContracts(stk)
@@ -108,7 +127,7 @@ def main():
                 ib.cancelMktData(stk)
 
             active_tickers = {}
-            for p in positions:
+            for p in portfolio_items:
                 c = p.contract
                 if c.secType in ('OPT', 'BAG'):
                     if not c.exchange: c.exchange = 'SMART'
@@ -127,12 +146,16 @@ def main():
             for sym, ivs in iv_values.items():
                 avg_ivs[sym] = sum(ivs) / len(ivs) if ivs else 0.30
 
-            for p in positions:
+            for p in portfolio_items:
                 c = p.contract
                 pos_data = {
                     'symbol': c.symbol, 'secType': c.secType, 'right': getattr(c, 'right', None),
                     'strike': getattr(c, 'strike', None), 'expiry': getattr(c, 'lastTradeDateOrContractMonth', None),
-                    'position': float(p.position), 'delta': None, 'gamma': None, 'theta': None, 'vega': None
+                    'position': float(p.position), 
+                    'avgCost': float(p.averageCost),
+                    'marketPrice': float(p.marketPrice),
+                    'unrealizedPNL': float(p.unrealizedPNL),
+                    'delta': None, 'gamma': None, 'theta': None, 'vega': None
                 }
                 
                 ticker = active_tickers.get(c.conId)

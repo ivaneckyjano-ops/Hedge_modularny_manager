@@ -289,21 +289,30 @@ class HedgeManagerGUI:
         notebook.add(tab_port, text="📊 Monitor Portfólia")
         if MODULAR_AVAILABLE:
             try:
-                # Vynútiť zobrazenie novej verzie
                 import importlib
                 import modularny.tab_monitor
+                import modularny.tab_swing_watcher
                 importlib.reload(modularny.tab_monitor)
+                importlib.reload(modularny.tab_swing_watcher)
                 from modularny.tab_monitor import create_monitor_tab
+                from modularny.tab_swing_watcher import create_swing_watcher_tab
+                
                 create_monitor_tab(tab_port, self.state)
+                
+                # === TAB 5: Swing Watcher ===
+                tab_swing = ttk.Frame(notebook)
+                notebook.add(tab_swing, text="📈 Swing Watcher")
+                create_swing_watcher_tab(tab_swing, self.state)
+                
             except Exception as e:
                 import traceback
-                error_msg = f"Chyba pri načítaní monitora: {e}\n{traceback.format_exc()}"
+                error_msg = f"Chyba pri načítaní záložiek: {e}\n{traceback.format_exc()}"
                 lbl = tk.Label(tab_port, text=error_msg, fg="red", justify="left")
                 lbl.pack(padx=20, pady=20)
                 print(error_msg)
         else:
             self.create_monitor_tab(tab_port)
-    
+
     def create_find_hedge_tab(self, parent):
         """Záložka pre hľadanie nového hedge"""
         frame = ttk.LabelFrame(parent, text="Parametre hľadania", padding=10)

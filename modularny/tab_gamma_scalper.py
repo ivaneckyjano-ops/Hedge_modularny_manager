@@ -15,6 +15,9 @@ import math
 import traceback
 from datetime import datetime
 
+from modularny.utils import is_market_stable
+from modularny.tab_swing_watcher import update_watcher_tree
+
 # --- POMOCNÉ FUNKCIE ---
 
 def update_gs_status(state, text, color="black"):
@@ -430,67 +433,139 @@ def refresh_log_window(state, win, f_val=None):
     # --- SEKCIÁ 1: ÚČTOVNÁ ZHRNUTIE (MAJETOK) ---
     f_sum = ttk.LabelFrame(win, text="📊 Účtovná súvaha skalpovania (Majetok & Inventár)"); f_sum.pack(fill='x', padx=5, pady=5)
     
-    sum_cols = ('sym', 'inv', 'cash', 'avg', 'market', 'total_pl')
-    sum_tree = ttk.Treeview(f_sum, columns=sum_cols, show='headings', height=4)
-    sum_tree.heading('sym', text='Symbol'); sum_tree.column('sym', width=70)
-    sum_tree.heading('inv', text='Inventár (ks)'); sum_tree.column('inv', width=100)
-    sum_tree.heading('cash', text='Realizovaný Cash'); sum_tree.column('cash', width=130)
-    sum_tree.heading('avg', text='Efekt. Cena'); sum_tree.column('avg', width=100)
-    sum_tree.heading('market', text='Trhová Cena'); sum_tree.column('market', width=100)
-    sum_tree.heading('total_pl', text='SUM (Majetok)'); sum_tree.column('total_pl', width=130)
+    sum_cols = ('sym', 'count', 'tws', 'inv', 'avg', 'market', 'real_pl', 'unreal_pl', 'total_pl')
+    sum_tree = ttk.Treeview(f_sum, columns=sum_cols, show='headings', height=5)
+    sum_tree.heading('sym', text='Symbol'); sum_tree.column('sym', width=65)
+    sum_tree.heading('count', text='Drifty'); sum_tree.column('count', width=50)
+    sum_tree.heading('tws', text='TWS Poz'); sum_tree.column('tws', width=75)
+    sum_tree.heading('inv', text='Skalp Ks'); sum_tree.column('inv', width=75)
+    sum_tree.heading('avg', text='Priem. Cena'); sum_tree.column('avg', width=95)
+    sum_tree.heading('market', text='Trh. Cena'); sum_tree.column('market', width=95)
+    sum_tree.heading('real_pl', text='Realiz. P/L'); sum_tree.column('real_pl', width=105)
+    sum_tree.heading('unreal_pl', text='Nerealiz. P/L'); sum_tree.column('unreal_pl', width=115)
+    sum_tree.heading('total_pl', text='CELKOM'); sum_tree.column('total_pl', width=115)
     sum_tree.pack(fill='x', padx=5, pady=5)
     
     log = load_scalp_log()
     summary = {}
+    
+    # Lepšia účtovná logika: separujeme Realizovaný P/L od Aktuálnej pozície
     for e in log:
         sym = e['symbol']
-        if sym not in summary: summary[sym] = {'qty': 0.0, 'cash': 0.0, 'last_p': 0.0, 'comm': 0.0}
+        if sym not in summary:
+            summary[sym] = {
+                'qty': 0.0, 
+                'realized_pl': 0.0, 
+                'avg_cost': 0.0, 
+                'comm': 0.0,
+                'last_p': 0.0,
+                'count': 0
+            }
+        
+        s = summary[sym]
+        s['count'] += 1
         try:
             q = float(e.get('qty', 0))
             p = float(e.get('price', 0))
             c = float(e.get('commission', 0))
-            if not math.isnan(p) and p > 0:
-                summary[sym]['last_p'] = p 
+            action = e.get('action', 'BUY')
             
-            p_val = p if not math.isnan(p) else 0.0
-            val = q * p_val
-            if e['action'] == 'BUY':
-                summary[sym]['qty'] += q
-                summary[sym]['cash'] -= (val + c)
-            else:
-                summary[sym]['qty'] -= q
-                summary[sym]['cash'] += (val - c)
-            summary[sym]['comm'] += c
+            if not math.isnan(p) and p > 0:
+                s['last_p'] = p 
+            
+            # Poplatky odpočítavame z celkového P/L
+            s['comm'] += c
+            
+            if action == 'BUY':
+                if s['qty'] < 0: # Zatváranie shortu
+                    closed_q = min(q, abs(s['qty']))
+                    # Zisk zo shortu: (Pôvodná Predajná Cena - Táto Nákupná Cena) * Ks
+                    s['realized_pl'] += closed_q * (s['avg_cost'] - p)
+                    s['qty'] += q
+                    if s['qty'] > 0: # Prešli sme do longu
+                        s['avg_cost'] = p
+                    # Ak s['qty'] <= 0, avg_cost ostáva rovnaký (pôvodný sell price)
+                else: # Sme v longe alebo na nule
+                    new_qty = s['qty'] + q
+                    s['avg_cost'] = (s['qty'] * s['avg_cost'] + q * p) / new_qty if new_qty > 0 else 0
+                    s['qty'] = new_qty
+            else: # SELL
+                if s['qty'] > 0: # Zatváranie longu
+                    closed_q = min(q, s['qty'])
+                    # Zisk z longu: (Táto Predajná Cena - Pôvodná Nákupná Cena) * Ks
+                    s['realized_pl'] += closed_q * (p - s['avg_cost'])
+                    s['qty'] -= q
+                    if s['qty'] < 0: # Prešli sme do shortu
+                        s['avg_cost'] = p
+                    # Ak s['qty'] >= 0, avg_cost ostáva rovnaký (pôvodný buy price)
+                else: # Sme v shorte alebo na nule
+                    new_qty = s['qty'] - q
+                    abs_q = abs(s['qty'])
+                    s['avg_cost'] = (abs_q * s['avg_cost'] + q * p) / abs(new_qty) if new_qty != 0 else 0
+                    s['qty'] = new_qty
         except: pass
 
     for sym in sorted(summary.keys()):
         s = summary[sym]
         inv = s['qty']
-        cash = s['cash']
-        last_p = s['last_p']
+        real_pl = s['realized_pl'] - s['comm']
+        avg_p = s['avg_cost']
         
-        avg_str = "—"
+        # Pokúsime sa získať TWS dáta zo stavu (ak existujú)
+        market_p = s['last_p']
+        tws_pos_str = "—"
+        
+        if hasattr(state, 'last_portfolio_data') and sym in state.last_portfolio_data:
+            p_data = state.last_portfolio_data[sym]
+            if isinstance(p_data, dict): # GS format
+                stk_info = p_data.get('STK', [])
+                if stk_info:
+                    t_pos = sum(float(p.get('position', 0)) for p in stk_info)
+                    tws_pos_str = f"{t_pos:+.0f}"
+                    for p in stk_info:
+                        if p.get('lastPrice') and float(p['lastPrice']) > 0:
+                            market_p = float(p['lastPrice'])
+            else: # Monitor format
+                t_pos = 0
+                for p in p_data:
+                    if p.get('secType') == 'STK':
+                        t_pos += float(p.get('position', 0))
+                        if p.get('lastPrice') and float(p['lastPrice']) > 0:
+                            market_p = float(p['lastPrice'])
+                tws_pos_str = f"{t_pos:+.0f}"
+
+        unreal_pl = 0.0
         if abs(inv) > 0.001:
-            avg_str = f"{abs(cash / inv):.2f} $"
-            
-        total_pl = cash + (inv * last_p)
+            if inv > 0:
+                unreal_pl = inv * (market_p - avg_p)
+            else:
+                unreal_pl = abs(inv) * (avg_p - market_p)
+                
+        total_pl = real_pl + unreal_pl
         
         sum_tree.insert('', tk.END, values=(
-            sym, 
-            f"{inv:+.0f} ks", 
-            f"{cash:+.2f} $", 
-            avg_str,
-            f"{last_p:.2f} $",
+            sym,
+            s['count'],
+            tws_pos_str,
+            f"{inv:+.0f}",
+            f"{avg_p:.2f} $" if avg_p > 0 else "—",
+            f"{market_p:.2f} $",
+            f"{real_pl:+.2f} $",
+            f"{unreal_pl:+.2f} $",
             f"{total_pl:+.2f} $"
         ))
     
-    # Pridávať tagy pre farby
+    # Farebné tagy pre P/L
     sum_tree.tag_configure('plus', foreground='green')
     sum_tree.tag_configure('minus', foreground='red')
     for item in sum_tree.get_children():
-        v_str = sum_tree.item(item)['values'][5]
-        if '+' in v_str: sum_tree.item(item, tags=('plus',))
-        elif '-' in v_str: sum_tree.item(item, tags=('minus',))
+        vals = sum_tree.item(item)['values']
+        try:
+            # CELKOM (posledný stĺpec - teraz index 8)
+            total_v = float(str(vals[8]).replace('$', '').replace(' ', ''))
+            if total_v > 0.01: sum_tree.item(item, tags=('plus',))
+            elif total_v < -0.01: sum_tree.item(item, tags=('minus',))
+        except: pass
 
     # --- SEKCIÁ 2: DETAILNÝ DENNÍK ---
     ttk.Separator(win, orient='horizontal').pack(fill='x', pady=5)
@@ -506,7 +581,7 @@ def refresh_log_window(state, win, f_val=None):
     ttk.Button(f_mid, text="❌ Zrušiť filter", command=lambda: refresh_log_window(state, win, f_val="")).pack(side='left', padx=2)
 
     # Treeview Detailov
-    cols = ('time', 'sym', 'act', 'qty', 'price', 'comm', 'total', 'note', 'id')
+    cols = ('time', 'sym', 'act', 'qty', 'price', 'comm', 'total', 'pl', 'note', 'id')
     tree = ttk.Treeview(win, columns=cols, show='headings', selectmode='browse')
     
     tree.heading('time', text='Čas'); tree.column('time', width=140)
@@ -516,10 +591,52 @@ def refresh_log_window(state, win, f_val=None):
     tree.heading('price', text='Cena'); tree.column('price', width=70)
     tree.heading('comm', text='Poplatok'); tree.column('comm', width=70)
     tree.heading('total', text='Celkom ($)'); tree.column('total', width=90)
+    tree.heading('pl', text='P/L Skalpu'); tree.column('pl', width=90)
     tree.heading('note', text='Poznámka (klik pre úpravu)'); tree.column('note', width=150)
     tree.heading('id', text='ID'); tree.column('id', width=0, stretch=False)
     
     tree.pack(fill='both', expand=True, padx=5, pady=5)
+
+    # Predvýpočet P/L pre každý jeden skalp (chronologicky)
+    pl_map = {}
+    temp_summary = {}
+    for e in log:
+        sym = e['symbol']
+        if sym not in temp_summary: temp_summary[sym] = {'qty': 0.0, 'avg_cost': 0.0}
+        ts = temp_summary[sym]
+        eid = e.get('id')
+        try:
+            q = float(e.get('qty', 0))
+            p = float(e.get('price', 0))
+            if math.isnan(p): p = 0.0
+            c = float(e.get('commission', 0))
+            if math.isnan(c): c = 0.0
+            
+            action = e.get('action', 'BUY')
+            e_pl = 0.0
+            
+            if action == 'BUY':
+                if ts['qty'] < 0: # Zatváranie shortu
+                    closed_q = min(q, abs(ts['qty']))
+                    e_pl = closed_q * (ts['avg_cost'] - p)
+                    ts['qty'] += q
+                    if ts['qty'] > 0: ts['avg_cost'] = p
+                else: # Otváranie longu
+                    new_q = ts['qty'] + q
+                    ts['avg_cost'] = (ts['qty'] * ts['avg_cost'] + q * p) / new_q if new_q > 0 else 0
+                    ts['qty'] = new_q
+            else: # SELL
+                if ts['qty'] > 0: # Zatváranie longu
+                    closed_q = min(q, ts['qty'])
+                    e_pl = closed_q * (p - ts['avg_cost'])
+                    ts['qty'] -= q
+                    if ts['qty'] < 0: ts['avg_cost'] = p
+                else: # Otváranie shortu
+                    new_q = ts['qty'] - q
+                    ts['avg_cost'] = (abs(ts['qty']) * ts['avg_cost'] + q * p) / abs(new_q) if new_q != 0 else 0
+                    ts['qty'] = new_q
+            pl_map[eid] = e_pl - c
+        except: pl_map[eid] = 0.0
     
     for e in reversed(log):
         if curr_f and curr_f not in e['symbol'].upper(): continue
@@ -529,11 +646,23 @@ def refresh_log_window(state, win, f_val=None):
             c = float(e.get('commission', 0))
             if math.isnan(p): p = 0.0
             total = q * p
-            tree.insert('', tk.END, values=(
+            e_pl = pl_map.get(e.get('id'), 0.0)
+            
+            item_id = tree.insert('', tk.END, values=(
                 e['timestamp'], e['symbol'], e['action'], f"{q:.0f}", 
-                f"{p:.2f}", f"{c:.2f}", f"{total:.2f}", e.get('note', ''), e.get('id', '')
+                f"{p:.2f}", f"{c:.2f}", f"{total:.2f}", f"{e_pl:+.2f} $", 
+                e.get('note', ''), e.get('id', '')
             ))
+            
+            # Farebné odlíšenie riadku podľa P/L
+            if e_pl > 0.01: tree.item(item_id, tags=('plus',))
+            elif e_pl < -0.01: tree.item(item_id, tags=('minus',))
+            
         except: pass
+
+    # Tagy pre detailný denník
+    tree.tag_configure('plus', foreground='green')
+    tree.tag_configure('minus', foreground='red')
 
     # Context Menu a Actions
     f_bot = ttk.Frame(win); f_bot.pack(fill='x', padx=5, pady=5)
@@ -542,7 +671,7 @@ def refresh_log_window(state, win, f_val=None):
         sel = tree.selection()
         if not sel: return
         item = tree.item(sel[0])
-        lid = item['values'][7]
+        lid = item['values'][9] # Index 9 je ID
         delete_scalp_entry(lid, state, win)
 
     def on_delete_sym():
@@ -557,17 +686,17 @@ def refresh_log_window(state, win, f_val=None):
     def on_edit_note(event):
         item_id = tree.identify_row(event.y)
         col = tree.identify_column(event.x)
-        if not item_id or col != '#7': return
+        if not item_id or col != '#9': return # Index 8 (stĺpec #9) je poznámka
         
         curr_vals = tree.item(item_id)['values']
-        old_note = curr_vals[6]
-        lid = curr_vals[7]
+        old_note = curr_vals[8]
+        lid = curr_vals[9]
         
         new_note = tk.simpledialog.askstring("Poznámka", "Upraviť poznámku:", initialvalue=old_note, parent=win)
         if new_note is not None:
             update_scalp_note(lid, new_note, state, win)
             new_v = list(curr_vals)
-            new_v[6] = new_note
+            new_v[8] = new_note
             tree.item(item_id, values=new_v)
 
     tree.bind('<Double-1>', on_edit_note)
@@ -881,6 +1010,7 @@ def check_position_gs(state):
     port = state.port_var.get()
     
     def run():
+        watcher_rows = []
         try:
             py = sys.executable; root = os.path.dirname(os.path.dirname(__file__))
             scr = os.path.join(root, 'scripts', 'tws_manual_test.py')
@@ -907,6 +1037,17 @@ def check_position_gs(state):
                     # Ignorovať BAG ak máme jednotlivé nohy (TWS špecifikum)
                     if p.get('secType') == 'BAG' and len(pos_data) > 1: continue 
                     portfolio[sym][exp].append(p)
+
+                # Uložiť pre ostatné moduly
+                state.last_portfolio_data = portfolio
+                
+                # --- PRÍPRAVA DÁT PRE SWING WATCHER ---
+                target_opt_pct = 50.0
+                target_stk_usd = 12.0
+                try:
+                    target_opt_pct = float(state.monitor_profit_target_pct.get())
+                    target_stk_usd = float(state.monitor_stock_profit_target_usd.get())
+                except: pass
 
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 final_report = [f"📊 MONITORING PORTFÓLIA ({timestamp})", "="*55]
@@ -940,6 +1081,68 @@ def check_position_gs(state):
                             g = p.get('gamma') or 0
                             t = p.get('theta') or 0
                             
+                            # Účtovné dáta pre Watchera
+                            unr_pl = float(p.get('unrealizedPNL', 0))
+                            avg_cost = float(p.get('avgCost', 0))
+                            mkt_price = float(p.get('marketPrice', 0))
+                            st = p.get('secType', 'STK')
+
+                            # Výpočet zisku pre Watcher (rovnaká logika ako v Monitore)
+                            pl_display = ""
+                            is_target = False
+                            is_warning = False
+                            
+                            # KRÍŽOVÁ KONTROLA (Cross-Check) proti TWS
+                            is_verified = False
+                            calc_pnl = 0.0
+                            if st == 'OPT':
+                                # TWS avgCost pre opcie už obsahuje multiplikátor 100
+                                avg_price_share = avg_cost / 100.0
+                                calc_pnl = (mkt_price - avg_price_share) * pos * 100.0
+                                
+                                pl_pct = 0.0
+                                if pos < 0 and avg_cost > 0:
+                                    # Prijatá prémia (max profit) = abs(pos) * avg_cost
+                                    max_profit = abs(pos) * avg_cost
+                                    pl_pct = (unr_pl / max_profit) * 100.0 if max_profit > 0 else 0
+                                elif pos > 0 and avg_cost > 0:
+                                    # Náklady = pos * avg_cost
+                                    cost_basis = pos * avg_cost
+                                    pl_pct = (unr_pl / cost_basis) * 100.0 if cost_basis > 0 else 0
+                                
+                                pl_display = f"{pl_pct:.1f} %"
+                                target_display = f"{target_opt_pct:.0f} %"
+                                is_target = pl_pct >= target_opt_pct
+                                is_warning = pl_pct >= float(state.monitor_profit_warning_pct.get())
+                                
+                                # Overenie (tolerancia 1% alebo 0.50$ kvôli poplatkom)
+                                if abs(calc_pnl - unr_pl) < (abs(unr_pl) * 0.01 + 0.50):
+                                    is_verified = True
+                                
+                                # Zobrazenie avg ceny za share pre opcie
+                                display_avg = f"{avg_price_share:.2f}"
+                            else: # STK
+                                calc_pnl = (mkt_price - avg_cost) * pos
+                                pl_display = f"{unr_pl:+.2f} $"
+                                target_display = f"{target_stk_usd:+.1f} $"
+                                is_target = unr_pl >= target_stk_usd
+                                is_warning = unr_pl >= (target_stk_usd * 0.5)
+                                
+                                if abs(calc_pnl - unr_pl) < (abs(unr_pl) * 0.01 + 0.10):
+                                    is_verified = True
+                                display_avg = f"{avg_cost:.2f}"
+
+                            desc = f"{p.get('right','')}{p.get('strike','')}" if st == 'OPT' else "AKCIE"
+                            watcher_rows.append({
+                                'sym': sym, 'desc': desc, 'pos': f"{pos:+.0f}",
+                                'price': f"{mkt_price:.2f}", 'avg': display_avg,
+                                'pl_usd': f"{unr_pl:+.2f} $", 'pl_display': pl_display,
+                                'target_display': target_display, 'is_target': is_target,
+                                'is_warning': is_warning, 'is_loss': unr_pl < 0,
+                                'is_verified': is_verified, 'secType': st,
+                                'raw_pl_usd': unr_pl, 'raw_pl_pct': pl_pct if st == 'OPT' else 0
+                            })
+
                             val_d = d * pos if p.get('secType') == 'OPT' else (pos / 100.0)
                             e_delta += val_d
                             e_gamma += (g * pos) if p.get('secType') == 'OPT' else 0
@@ -968,6 +1171,43 @@ def check_position_gs(state):
                                 e_warning = f"⚠️ EARNINGS ZA {days_to_e} DNÍ!"
                         except: pass
 
+                    # KONTROLA DIVIDEND (Early Exercise)
+                    div_warning = ""
+                    div_info = state.get_dividend_info(sym)
+                    if div_info and div_info.get('rate', 0) > 0 and div_info.get('ex_date'):
+                        try:
+                            ex_date = div_info['ex_date']
+                            days_to_div = (ex_date - datetime.now().date()).days
+                            
+                            # Ak je ex-div date dnes alebo zajtra (0 alebo 1 deň)
+                            if 0 <= days_to_div <= 1:
+                                div_rate = div_info['rate']
+                                # Získame cenu podkladu
+                                stock_price = 0
+                                if 'STK' in portfolio[sym]:
+                                    for p in portfolio[sym]['STK']:
+                                        if p.get('marketPrice'): stock_price = float(p['marketPrice'])
+                                        elif p.get('lastPrice'): stock_price = float(p['lastPrice'])
+                                
+                                # Prechádzame opcie a hľadáme Long Calls na exercise
+                                for exp_key in portfolio[sym]:
+                                    if exp_key == "STK": continue
+                                    for p in portfolio[sym][exp_key]:
+                                        if p.get('right') == 'C' and float(p.get('position', 0)) > 0:
+                                            strike = float(p.get('strike', 0))
+                                            opt_price = float(p.get('marketPrice') or p.get('lastPrice') or 0)
+                                            
+                                            if stock_price > 0 and strike > 0 and opt_price > 0:
+                                                intrinsic = max(0, stock_price - strike)
+                                                extrinsic = opt_price - intrinsic
+                                                
+                                                # Ak je dividenda väčšia ako časová hodnota -> Exercise!
+                                                if div_rate > extrinsic:
+                                                    div_warning = f"🎁 DIV ALERT: Exercise {sym} (Div ${div_rate:.2f} > Extr ${extrinsic:.2f})"
+                                                    break
+                        except Exception as de:
+                            print(f"DEBUG: Dividend check error for {sym}: {de}")
+
                     # Drift Tolerance a Cieľová Delta
                     drift_tol = 0.20
                     target_delta = 0.0
@@ -995,8 +1235,19 @@ def check_position_gs(state):
                     # Robotická časť (Auto-Scalp)
                     robot_status = ""
                     if state.gs_auto_scalp_var.get():
+                        # 1. KONTROLA STABILITY TRHU (15 min po Open)
+                        stable, stable_msg = is_market_stable(buffer_minutes=15)
+                        if not stable:
+                            robot_status = f"⏳ {stable_msg}"
+                            has_drift = False # Robot v tomto cykle nič neurobí
+                        
+                        # 2. KONTROLA PLATNOSTI DÁT (Proti NaN a 0.0)
+                        elif math.isnan(symbol_net_delta) or math.isnan(symbol_gamma) or symbol_gamma == 0:
+                            robot_status = "⚠️ Čakám na Greeks z TWS..."
+                            has_drift = False
+
                         # Robot pracuje buď na všetkom (multi), alebo len na aktívnom symbole
-                        if is_multi or sym == active_sym:
+                        elif is_multi or sym == active_sym:
                             # AUTOMATICKÁ BRZDA: Ak sú earnings blízko (0-1 deň), robot neobchoduje
                             if 0 <= days_to_e <= 1:
                                 robot_status = "🛑 ROBOT STOP (Earnings blízko)"
@@ -1065,12 +1316,14 @@ def check_position_gs(state):
                             if robot_status: line += f" | {robot_status}"
                             elif has_drift: line += f" | 🚨 DRIFT {current_drift:+.2f}!"
                             if e_warning: line += f" | {e_warning}"
+                            if div_warning: line += f" | {div_warning}"
                             final_report.append(line)
                         else:
                             # Detailný report pre JEDEN symbol
                             sym_report.append(f" 👉 Aktuálna Δ: {symbol_net_delta:+.3f} | Cieľová Δ: {target_delta:+.2f}")
                             sym_report.append(f" 👉 Relatívny Drift: {current_drift:+.3f} | Γ/Θ: {gt:.4f} {ico}")
                             if e_warning: sym_report.append(f" {e_warning}")
+                            if div_warning: sym_report.append(f" {div_warning}")
                             if has_drift: sym_report.append(f" 🚨 DRIFT DETEKOVANÝ (>±{drift_tol:.2f})")
                             
                             # Pohyb pre drift
@@ -1101,6 +1354,16 @@ def check_position_gs(state):
                      final_report.append("\nℹ️ Žiadne Gamma Scalper stratégie (s opciami) nenájdené.")
 
                 update_gs_monitor_text(state, "\n".join(final_report))
+                # AKTUALIZÁCIA SWING WATCHERA
+                state.root.after(0, lambda: update_watcher_tree(state, watcher_rows))
+                
+                # --- HEARTBEAT & ČAS ---
+                def pulse():
+                    current_h = state.heartbeat_var.get()
+                    new_h = "[ • ]" if "OK" in current_h else "[ OK ]"
+                    state.heartbeat_var.set(new_h)
+                    state.last_update_time_var.set(f"Aktualizované: {timestamp}")
+                state.root.after(0, pulse)
                 
             # Naplánovať ďalšiu kontrolu
             if state.gs_auto_monitor_var.get(): 

@@ -17,16 +17,25 @@ if venv_site.exists():
 from ib_insync import IB, Option, Bag, ComboLeg, MarketOrder, LimitOrder
 
 def main():
-    parser = argparse.ArgumentParser(description='Place a Strangle Combo order in TWS')
+    parser = argparse.ArgumentParser(description='Place orders in TWS (Single or Combo)')
     parser.add_argument('--symbol', required=True)
     parser.add_argument('--expiry', required=True)
-    parser.add_argument('--call-strike', type=float, required=True)
-    parser.add_argument('--put-strike', type=float, required=True)
-    parser.add_argument('--quantity', type=int, default=1)
+    parser.add_argument('--call-strike', type=float, help='Strike for Call leg')
+    parser.add_argument('--put-strike', type=float, help='Strike for Put leg')
+    parser.add_argument('--action', choices=['BUY', 'SELL'], default='BUY', help='Action for the order')
+    parser.add_argument('--qty', type=int, default=1, help='Quantity')
     parser.add_argument('--port', type=int, default=7497)
     parser.add_argument('--live', action='store_true', help='Enable real orders')
     
+    # Pre kompatibilitu so starým volaním v tab_gamma_scalper.py
+    parser.add_argument('--quantity', type=int, help='Quantity (alias for --qty)')
+
     args = parser.parse_args()
+    
+    # Handle qty alias
+    quantity = args.qty
+    if args.quantity is not None:
+        quantity = args.quantity
 
     # Bezpečnostná poistka
     if not args.live and args.port != 7497:
@@ -38,179 +47,110 @@ def main():
         client_id = random.randint(140, 199)
         ib.connect('127.0.0.1', args.port, clientId=client_id, timeout=15)
         
-        # 1. Definícia opčných nôh
-        c_leg = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD')
-        p_leg = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD')
+        contract = None
+        mode = "Unknown"
+
+        # 1. Rozhodnutie o type kontraktu
+        if args.call_strike is not None and args.put_strike is not None:
+            # STRANGLE COMBO (Dve nohy)
+            mode = "Combo"
+            c_leg = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD')
+            p_leg = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD')
+            
+            qualified = ib.qualifyContracts(c_leg, p_leg)
+            if len(qualified) < 2:
+                print(json.dumps({'success': False, 'error': f'Nepodarilo sa overiť opčné kontrakty pre {args.symbol} {args.expiry}.'}))
+                return
+
+            legs = [
+                ComboLeg(conId=c_leg.conId, ratio=1, action=args.action, exchange='SMART'),
+                ComboLeg(conId=p_leg.conId, ratio=1, action=args.action, exchange='SMART')
+            ]
+            contract = Bag(symbol=args.symbol, exchange='SMART', currency='USD', comboLegs=legs)
+            ib.qualifyContracts(contract)
+            
+        elif args.call_strike is not None:
+            # SINGLE CALL
+            mode = "Call"
+            contract = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD')
+            ib.qualifyContracts(contract)
+            
+        elif args.put_strike is not None:
+            # SINGLE PUT
+            mode = "Put"
+            contract = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD')
+            ib.qualifyContracts(contract)
         
-        # Kvalifikácia kontraktov (získanie conId)
-        qualified = ib.qualifyContracts(c_leg, p_leg)
-        if len(qualified) < 2:
-            print(json.dumps({
-                'success': False, 
-                'error': f'Nepodarilo sa overiť opčné kontrakty pre {args.symbol} {args.expiry}. Striky {args.call_strike}/{args.put_strike} možno neexistujú.'
-            }))
+        if not contract:
+            print(json.dumps({'success': False, 'error': 'Musíte zadať aspoň jeden strike (--call-strike alebo --put-strike).'}))
             return
 
-        # 2. Vytvorenie Combo (Bag) kontraktu
-        legs = [
-            ComboLeg(conId=c_leg.conId, ratio=1, action='BUY', exchange='SMART'),
-            ComboLeg(conId=p_leg.conId, ratio=1, action='BUY', exchange='SMART')
-        ]
-        
-        strangle_contract = Bag(
-            symbol=args.symbol,
-            exchange='SMART',
-            currency='USD',
-            comboLegs=legs
-        )
-        
-        # Kvalifikácia Combo kontraktu
-        qualified_bag = ib.qualifyContracts(strangle_contract)
-        
-        fallback_mode = False
-        if not qualified_bag:
-             print(f"DEBUG: Combo kvalifikácia zlyhala pre {args.symbol}. Skúšam zadať ako samostatné nohy.", file=sys.stderr)
-             fallback_mode = True
-        
-        # 3. Získanie ceny
+        # 2. Získanie ceny pre Limit Order
         price = 0.0
         source = "None"
+        ticker = ib.reqMktData(contract, '106', False, False)
         
-        if not fallback_mode:
-            # Pôvodná logika pre Combo
-            t_combo = ib.reqMktData(strangle_contract, '106', False, False)
-            start = time.time()
-            while time.time() - start < 4:
-                ib.sleep(0.2)
-                if t_combo.ask > 0 and not math.isnan(t_combo.ask): price = t_combo.ask; source="Combo Ask"; break
-                if t_combo.last > 0 and not math.isnan(t_combo.last): price = t_combo.last; source="Combo Last"; break
-                if t_combo.close > 0 and not math.isnan(t_combo.close): price = t_combo.close; source="Combo Close"; break
-                if t_combo.modelGreeks and t_combo.modelGreeks.optPrice > 0:
-                    price = t_combo.modelGreeks.optPrice; source="Combo Model"; break
-        
-        # Ak combo zlyhalo alebo sme v fallback móde, musíme získať ceny pre nohy
-        p_c = 0.0
-        p_p = 0.0
-        
-        if price <= 0 or fallback_mode:
-            t_c = ib.reqMktData(c_leg, '106', False, False)
-            t_p = ib.reqMktData(p_leg, '106', False, False)
+        start = time.time()
+        while time.time() - start < 4:
+            ib.sleep(0.2)
+            # Pre BUY chceme Ask, pre SELL chceme Bid
+            if args.action == 'BUY':
+                if ticker.ask > 0 and not math.isnan(ticker.ask): price = ticker.ask; source="Ask"; break
+            else:
+                if ticker.bid > 0 and not math.isnan(ticker.bid): price = ticker.bid; source="Bid"; break
             
-            # Čakáme na dáta
-            start = time.time()
-            while time.time() - start < 4:
-                ib.sleep(0.2)
-                # Call
-                if p_c <= 0:
-                    if t_c.ask > 0 and not math.isnan(t_c.ask): p_c = t_c.ask
-                    elif t_c.last > 0 and not math.isnan(t_c.last): p_c = t_c.last
-                    elif t_c.close > 0 and not math.isnan(t_c.close): p_c = t_c.close
-                    elif t_c.modelGreeks and t_c.modelGreeks.optPrice > 0: p_c = t_c.modelGreeks.optPrice
-                # Put
-                if p_p <= 0:
-                    if t_p.ask > 0 and not math.isnan(t_p.ask): p_p = t_p.ask
-                    elif t_p.last > 0 and not math.isnan(t_p.last): p_p = t_p.last
-                    elif t_p.close > 0 and not math.isnan(t_p.close): p_p = t_p.close
-                    elif t_p.modelGreeks and t_p.modelGreeks.optPrice > 0: p_p = t_p.modelGreeks.optPrice
-                
-                if p_c > 0 and p_p > 0: break
-            
-            if p_c > 0 and p_p > 0:
-                price = p_c + p_p
-                if not fallback_mode: source = "Sum of Legs"
+            if ticker.last > 0 and not math.isnan(ticker.last): price = ticker.last; source="Last"; break
+            if ticker.close > 0 and not math.isnan(ticker.close): price = ticker.close; source="Close"; break
+            if ticker.modelGreeks and ticker.modelGreeks.optPrice > 0: price = ticker.modelGreeks.optPrice; source="Model"; break
+        
+        ib.cancelMktData(contract)
 
-        if fallback_mode:
-            # FALLBACK: Odoslanie dvoch samostatných príkazov
-            orders_info = []
-            
-            # Call Leg
-            lmt_c = round(p_c * 1.05, 2) if p_c > 0 else 0.0
-            ord_c = LimitOrder('BUY', args.quantity, lmt_c) if lmt_c > 0 else MarketOrder('BUY', args.quantity)
-            ord_c.transmit = True # Poslať hneď
-            ord_c.outsideRth = True
-            
-            trade_c = ib.placeOrder(c_leg, ord_c)
-            orders_info.append(f"Call {lmt_c:.2f}")
-            
-            # Put Leg
-            lmt_p = round(p_p * 1.05, 2) if p_p > 0 else 0.0
-            ord_p = LimitOrder('BUY', args.quantity, lmt_p) if lmt_p > 0 else MarketOrder('BUY', args.quantity)
-            ord_p.transmit = True
-            ord_p.outsideRth = True
-            
-            trade_p = ib.placeOrder(p_leg, ord_p)
-            orders_info.append(f"Put {lmt_p:.2f}")
-            
-            # Počkáme chvíľu na potvrdenie
-            ib.sleep(1.0)
-            
-            print(json.dumps({
-                'success': True,
-                'symbol': args.symbol,
-                'expiry': args.expiry,
-                'strikes': {'call': args.call_strike, 'put': args.put_strike},
-                'orderId': f"{trade_c.order.orderId}, {trade_p.order.orderId}",
-                'status': "Sent (Fallback)",
-                'msg': f'Odoslané ako 2 samostatné príkazy (Combo zlyhalo). Ceny: {", ".join(orders_info)}'
-            }))
-            return
-
-        # 4. Place Order (Standard Combo)
+        # 3. Vytvorenie objednávky
         if price > 0:
-            limit_price = round(price * 1.05, 2) # +5% buffer
-            order = LimitOrder('BUY', args.quantity, limit_price)
+            # Buffer pre Limit: BUY (+5%), SELL (-5%)
+            limit_price = round(price * 1.05, 2) if args.action == 'BUY' else round(price * 0.95, 2)
+            order = LimitOrder(args.action, quantity, limit_price)
             order_type_msg = f"Limit Order @ {limit_price} (Ref: {price:.2f} {source})"
         else:
-            # Ak nemáme cenu, skúsime MarketOrder ale s poistkou
-            order = MarketOrder('BUY', args.quantity)
+            order = MarketOrder(args.action, quantity)
             order_type_msg = "Market Order (No Price Found)"
         
-        # Pridáme dôležité parametre
-        order.orderRef = 'GammaScalper'
+        order.orderRef = 'HedgeManager'
         order.transmit = True 
         order.outsideRth = True
 
-        trade = ib.placeOrder(strangle_contract, order)
+        trade = ib.placeOrder(contract, order)
         
-        # Sledovanie stavu (pár sekúnd)
+        # Sledovanie stavu
         for _ in range(10):
             ib.sleep(0.5)
-            if trade.orderStatus.status in ('Submitted', 'PreSubmitted', 'Filled'):
-                break
-            if trade.orderStatus.status in ('Cancelled', 'Inactive', 'Rejected'):
-                break
+            if trade.orderStatus.status in ('Submitted', 'PreSubmitted', 'Filled'): break
+            if trade.orderStatus.status in ('Cancelled', 'Inactive', 'Rejected'): break
 
         if trade.orderStatus.status in ('Cancelled', 'Inactive', 'Rejected'):
-             # Skúsime získať dôvod z logu trade
              reason = "Neznámy dôvod"
              if trade.log:
-                 # Zoberieme poslednú správu z logu, ktorá obsahuje chybu
                  for entry in reversed(trade.log):
-                     if entry.message:
-                         reason = entry.message
-                         break
+                     if entry.message: reason = entry.message; break
              
-             print(json.dumps({
-                'success': False, 
-                'error': f'Objednávka bola zamietnutá alebo zrušená v TWS. Status: {trade.orderStatus.status}\nDôvod: {reason}'
-            }))
+             print(json.dumps({'success': False, 'error': f'TWS Error: {trade.orderStatus.status} - {reason}'}))
              return
 
         print(json.dumps({
             'success': True,
             'symbol': args.symbol,
-            'expiry': args.expiry,
-            'strikes': {'call': args.call_strike, 'put': args.put_strike},
+            'mode': mode,
+            'action': args.action,
+            'qty': quantity,
             'orderId': trade.order.orderId,
             'status': trade.orderStatus.status,
-            'msg': f'Strangle combo ({order_type_msg}) bolo odoslané do TWS (Status: {trade.orderStatus.status}).'
+            'msg': f'{mode} {args.action} ({order_type_msg}) bolo odoslané do TWS.'
         }))
         
     except Exception as e:
         print(json.dumps({'success': False, 'error': str(e)}))
     finally:
-        if ib.isConnected():
-            ib.disconnect()
+        if ib.isConnected(): ib.disconnect()
 
 if __name__ == "__main__":
     main()

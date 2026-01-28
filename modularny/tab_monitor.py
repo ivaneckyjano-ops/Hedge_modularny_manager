@@ -4,6 +4,7 @@ Záložka: Monitor
 Monitorovanie celého portfólia z TWS.
 """
 import json
+import math
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import subprocess
@@ -11,6 +12,8 @@ import threading
 import os
 import sys
 from datetime import datetime
+
+from modularny.tab_swing_watcher import update_watcher_tree
 
 
 def check_position(state, selected_symbols=None):
@@ -34,6 +37,7 @@ def check_position(state, selected_symbols=None):
         return
     
     def run():
+        watcher_rows = [] # Inicializácia hneď na začiatku vlákna
         try:
             py = sys.executable
             root = os.path.dirname(os.path.dirname(__file__))
@@ -94,9 +98,21 @@ def check_position(state, selected_symbols=None):
                 if s and s != '???' and s.strip():
                     portfolio.setdefault(s, []).append(p)
 
+            # Uložiť výsledky do stavu pre ostatné moduly
+            state.last_portfolio_data = portfolio
+            
             timestamp = datetime.now().strftime("%H:%M:%S")
             report = [f"📊 KOMPLETNÉ PORTFÓLIO ({timestamp})", "="*60]
+            div_report = [] # NOVÉ: Pre samostatné okno dividend
             
+            # Parametre pre Watchera (získame zo stavu)
+            target_opt_pct = 50.0
+            target_stk_usd = 12.0
+            try:
+                target_opt_pct = float(state.monitor_profit_target_pct.get())
+                target_stk_usd = float(state.monitor_stock_profit_target_usd.get())
+            except: pass
+
             for sym in sorted(portfolio.keys()):
                 sym_pos = portfolio[sym]
                 opt_delta, stk_delta, sym_gamma = 0, 0, 0
@@ -106,7 +122,50 @@ def check_position(state, selected_symbols=None):
                     try:
                         pos = float(p.get('position', 0))
                         st = p.get('secType', 'STK')
-                        
+                        unr_pl = float(p.get('unrealizedPNL', 0))
+                        avg_cost = float(p.get('avgCost', 0))
+                        mkt_price = float(p.get('marketPrice', 0))
+
+                        # Logika pre Watchera (rovnaká ako v Gamma Scalper)
+                        is_verified = False
+                        calc_pnl = 0.0
+                        if st == 'OPT':
+                            avg_price_share = avg_cost / 100.0
+                            calc_pnl = (mkt_price - avg_price_share) * pos * 100.0
+                            pl_pct = 0.0
+                            if pos < 0 and avg_cost > 0:
+                                max_profit = abs(pos) * avg_cost
+                                pl_pct = (unr_pl / max_profit) * 100.0 if max_profit > 0 else 0
+                            elif pos > 0 and avg_cost > 0:
+                                cost_basis = pos * avg_cost
+                                pl_pct = (unr_pl / cost_basis) * 100.0 if cost_basis > 0 else 0
+                            
+                            pl_display = f"{pl_pct:.1f} %"
+                            target_display = f"{target_opt_pct:.0f} %"
+                            is_target = pl_pct >= target_opt_pct
+                            is_warning = pl_pct >= float(state.monitor_profit_warning_pct.get())
+                            if abs(calc_pnl - unr_pl) < (abs(unr_pl) * 0.01 + 0.50): is_verified = True
+                            display_avg = f"{avg_price_share:.2f}"
+                        else:
+                            calc_pnl = (mkt_price - avg_cost) * pos
+                            pl_display = f"{unr_pl:+.2f} $"
+                            target_display = f"{target_stk_usd:+.1f} $"
+                            is_target = unr_pl >= target_stk_usd
+                            is_warning = unr_pl >= (target_stk_usd * 0.5)
+                            if abs(calc_pnl - unr_pl) < (abs(unr_pl) * 0.01 + 0.10): is_verified = True
+                            display_avg = f"{avg_cost:.2f}"
+
+                        desc = f"{p.get('right','')}{p.get('strike','')}" if st == 'OPT' else "AKCIE"
+                        watcher_rows.append({
+                            'sym': sym, 'desc': desc, 'pos': f"{pos:+.0f}",
+                            'price': f"{mkt_price:.2f}", 'avg': display_avg,
+                            'pl_usd': f"{unr_pl:+.2f} $", 'pl_display': pl_display,
+                            'target_display': target_display, 'is_target': is_target,
+                            'is_warning': is_warning, 'is_loss': unr_pl < 0,
+                            'is_verified': is_verified, 'secType': st,
+                            'raw_pl_usd': unr_pl, 'raw_pl_pct': pl_pct if st == 'OPT' else 0
+                        })
+
                         if st == 'OPT':
                             # Bezpečná konverzia None na 0
                             delta_val = p.get('delta')
@@ -143,9 +202,53 @@ def check_position(state, selected_symbols=None):
                 except (ValueError, TypeError, AttributeError):
                     t = 0.20
                 if abs(net_delta) > t: report.append(f"   🚨 DRIFT DETEKOVANÝ (>±{t:.2f})")
+
+                # KONTROLA DIVIDEND (Early Exercise)
+                div_info = state.get_dividend_info(sym)
+                if div_info and div_info.get('rate', 0) > 0 and div_info.get('ex_date'):
+                    try:
+                        ex_date = div_info['ex_date']
+                        days_to_div = (ex_date - datetime.now().date()).days
+                        div_rate = div_info['rate']
+
+                        if 0 <= days_to_div <= 2:
+                            # Hľadáme Long Calls na exercise
+                            stock_price = 0
+                            for p in sym_pos:
+                                if p.get('secType') == 'STK':
+                                    stock_price = float(p.get('marketPrice') or p.get('lastPrice') or 0)
+                            
+                            has_long_calls = False
+                            exercise_recommended = False
+                            
+                            for p in sym_pos:
+                                if p.get('secType') == 'OPT' and p.get('right') == 'C' and float(p.get('position', 0)) > 0:
+                                    has_long_calls = True
+                                    strike = float(p.get('strike', 0))
+                                    opt_price = float(p.get('marketPrice') or p.get('lastPrice') or 0)
+                                    if stock_price > 0 and strike > 0 and opt_price > 0:
+                                        intrinsic = max(0, stock_price - strike)
+                                        extrinsic = opt_price - intrinsic
+                                        if div_rate > extrinsic:
+                                            msg = f"✅ DOPORUČUJEME EXERCISE: {sym} (Div ${div_rate:.2f} > Extr ${extrinsic:.2f})"
+                                            report.append(f"   🎁 {msg}")
+                                            div_report.append(msg)
+                                            exercise_recommended = True
+                                            break
+                                        else:
+                                            msg = f"❌ NEVÝHODNÝ EXERCISE: {sym} (Div ${div_rate:.2f} < Extr ${extrinsic:.2f})"
+                                            div_report.append(msg)
+                                            exercise_recommended = True # Nastavíme na true aby sme neposielali "blíži sa" správu
+                                            break
+                            
+                            if not exercise_recommended:
+                                div_report.append(f"⏳ BLÍŽI SA DIVIDENDA: {sym} (Ex-date: {ex_date}) - Nemáte vhodnú Long Call.")
+                    except: pass
+
                 report.append("-" * 40)
 
             final_text = "\n".join(report)
+            div_final_text = "\n".join(div_report) if div_report else "Žiadne blízke dividendy (0-2 dni) nevyžadujú akciu."
             
             # Update status baru na zelenú pri úspechu
             if 'modularny.tab_gamma_scalper' in sys.modules:
@@ -156,7 +259,12 @@ def check_position(state, selected_symbols=None):
                 state.monitor_result_text.config(state='normal'),
                 state.monitor_result_text.delete(1.0, tk.END),
                 state.monitor_result_text.insert(tk.END, final_text),
-                state.monitor_result_text.config(state='disabled')
+                state.monitor_result_text.config(state='disabled'),
+                state.monitor_div_info_text.config(state='normal') if hasattr(state, 'monitor_div_info_text') else None,
+                state.monitor_div_info_text.delete(1.0, tk.END) if hasattr(state, 'monitor_div_info_text') else None,
+                state.monitor_div_info_text.insert(tk.END, div_final_text) if hasattr(state, 'monitor_div_info_text') else None,
+                state.monitor_div_info_text.config(state='disabled') if hasattr(state, 'monitor_div_info_text') else None,
+                update_watcher_tree(state, watcher_rows)
             ])
 
         except Exception as e:
@@ -185,6 +293,8 @@ def update_symbol_selection_ui(state, symbols, parent_frame):
     for i, sym in enumerate(sorted(symbols)):
         if sym not in state.monitor_selected_symbols:
             state.monitor_selected_symbols[sym] = tk.BooleanVar(value=True)
+            # Pridať trace pre automatické ukladanie pri zmene
+            state.monitor_selected_symbols[sym].trace_add('write', lambda *args: state.save_settings_file())
         
         cb = ttk.Checkbutton(parent_frame, text=sym, variable=state.monitor_selected_symbols[sym])
         cb.grid(row=i // cols, column=i % cols, sticky='w', padx=10, pady=2)
@@ -226,25 +336,41 @@ def create_monitor_tab(parent, state):
     selection_frame.pack(fill='x', pady=5)
     
     # Scrollovateľný rámik pre checkboxy
-    symbols_canvas = tk.Canvas(selection_frame, borderwidth=0, background="#f0f0f0")
+    # Zmeníme usporiadanie: vľavo checkboxy, vpravo okno pre dividendy
+    selection_top_frame = ttk.Frame(selection_frame)
+    selection_top_frame.pack(fill='both', expand=True)
+
+    left_selection = ttk.Frame(selection_top_frame)
+    left_selection.pack(side='left', fill='both', expand=True)
+
+    symbols_canvas = tk.Canvas(left_selection, borderwidth=0, background="#f0f0f0", height=120)
     symbols_frame = ttk.Frame(symbols_canvas)
-    symbols_vbar = ttk.Scrollbar(selection_frame, orient="vertical", command=symbols_canvas.yview)
+    symbols_vbar = ttk.Scrollbar(left_selection, orient="vertical", command=symbols_canvas.yview)
     symbols_canvas.configure(yscrollcommand=symbols_vbar.set)
 
     symbols_vbar.pack(side="right", fill="y")
     symbols_canvas.pack(side="left", fill="both", expand=True)
     
+    # Okno pre dividendy vpravo (tam kde bolo prázdno)
+    right_info = ttk.LabelFrame(selection_top_frame, text="🎁 Dividend & Exercise Info", padding=5)
+    right_info.pack(side='right', fill='both', expand=True, padx=(10, 0))
+    
+    div_info_text = scrolledtext.ScrolledText(right_info, font=('Arial', 9), height=7, width=40)
+    div_info_text.pack(fill='both', expand=True)
+    div_info_text.insert(tk.END, "Tu sa zobrazia odporúčania pre Exercise...\n")
+    div_info_text.config(state='disabled')
+    state.monitor_div_info_text = div_info_text # Uložiť do stavu
+
     # DÔLEŽITÉ: Uložiť ID okna pre neskoršiu zmenu šírky
     canvas_window_id = symbols_canvas.create_window((0,0), window=symbols_frame, anchor="nw", 
-                                  width=selection_frame.winfo_width(), height=100)
+                                  width=200, height=100)
     
     def on_frame_configure(event):
         symbols_canvas.configure(scrollregion=symbols_canvas.bbox("all"))
-        # Použiť uložené ID okna
-        symbols_canvas.itemconfig(canvas_window_id, width=selection_frame.winfo_width())
 
     symbols_frame.bind("<Configure>", on_frame_configure)
-    selection_frame.bind("<Configure>", lambda e: symbols_canvas.itemconfig(canvas_window_id, width=e.width))
+    # Zabezpečiť aby sa checkboxy prispôsobili šírke
+    left_selection.bind("<Configure>", lambda e: symbols_canvas.itemconfig(canvas_window_id, width=e.width-20))
 
     state.monitor_symbols_frame = symbols_frame # Ulož referenciu pre dynamickú aktualizáciu
 
@@ -323,7 +449,7 @@ def create_monitor_tab(parent, state):
               .pack(side='right', padx=5)
 
     # Monitor výsledok
-    result_frame = ttk.LabelFrame(frame, text="📊 Prehľad vybraných pozícií", padding=10)
+    result_frame = ttk.LabelFrame(frame, text="📊 Prehľad Delta & Greeks", padding=10)
     result_frame.pack(fill='both', expand=True, pady=5)
     
     monitor_result_text = scrolledtext.ScrolledText(result_frame, font=('Courier', 11))

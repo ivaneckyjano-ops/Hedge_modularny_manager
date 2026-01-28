@@ -25,6 +25,7 @@ class SharedState:
         self.saved_gamma_scalper_strategies = {}
         self.saved_gamma_semafor_configs = {} 
         self.ticker_settings = {} # Archív nastavení pre jednotlivé tickery (drift tol atď.)
+        self.custom_pairs = {} # NOVÉ: Definície párov pre Swing Watcher {názov: [sym1, sym2, ...]}
         self.profiles = {}
         
         # Načítaj profily
@@ -66,6 +67,8 @@ class SharedState:
         self.expiry_filter_note_var = tk.StringVar(value="")
         self.gamma_status_var = tk.StringVar(value="Gamma/Teta: —")
         self.monitor_status_var = tk.StringVar(value="Monitor: —") # Nová premenná pre status bar
+        self.heartbeat_var = tk.StringVar(value="[ -- ]") # Vizuálny Heartbeat
+        self.last_update_time_var = tk.StringVar(value="Posledná aktualizácia: ---")
         self.vix_value = None
         self._gamma_status_info = {}
         
@@ -184,6 +187,27 @@ class SharedState:
         # Monitor - vybrané symboly na hedžovanie
         self.monitor_selected_symbols = {} # Slovník sym -> tk.BooleanVar
         
+        # NOVÉ: Swing Profit Watcher nastavenia
+        self.monitor_profit_target_pct = tk.StringVar(value="50.0") # Cieľ pre zatvorenie opcií
+        self.monitor_profit_warning_pct = tk.StringVar(value="30.0") # Cieľ pre upozornenie opcií
+        self.monitor_stock_profit_target_usd = tk.StringVar(value="12.0") # Cieľ pre akcie (12x poplatok)
+        self.monitor_auto_close_var = tk.BooleanVar(value=False) # Či má robot sám zatvárať
+        self.monitor_auto_restart_var = tk.BooleanVar(value=False) # NOVÉ: Re-entry po zatvorení (Cycle)
+        
+        # NOVÉ: Trailing Stop nastavenia
+        self.monitor_trailing_opt_pct = tk.StringVar(value="5.0") # O koľko % musí klesnúť profit z peaku (Opcie)
+        self.monitor_trailing_stk_usd = tk.StringVar(value="2.0") # O koľko $ musí klesnúť profit z peaku (Akcie)
+        self.trailing_peaks = {} # Pamäť pre High Water Mark {pos_key: max_pl}
+        
+        # Automatické ukladanie pri zmene nastavení Swing Watchera
+        self.monitor_profit_target_pct.trace_add('write', lambda *args: self.save_settings_file())
+        self.monitor_profit_warning_pct.trace_add('write', lambda *args: self.save_settings_file())
+        self.monitor_stock_profit_target_usd.trace_add('write', lambda *args: self.save_settings_file())
+        self.monitor_auto_close_var.trace_add('write', lambda *args: self.save_settings_file())
+        self.monitor_auto_restart_var.trace_add('write', lambda *args: self.save_settings_file())
+        self.monitor_trailing_opt_pct.trace_add('write', lambda *args: self.save_settings_file())
+        self.monitor_trailing_stk_usd.trace_add('write', lambda *args: self.save_settings_file())
+        
         # Status bar widgets (budú nastavené v create_status_bar)
         self.conn_indicator = None
         self.conn_label = None
@@ -192,6 +216,9 @@ class SharedState:
         self._auto_recalc_callback = None
         self._bal_opposite_strike_callback = None
         
+        # Cache pre dividendy
+        self.dividend_cache = {} 
+
         # Načítaj nastavenia
         self.load_settings_file()
         
@@ -261,6 +288,13 @@ class SharedState:
         
         self.conn_label = ttk.Label(status_frame, text="Nepripojené", font=('Arial', 9))
         self.conn_label.pack(side='left', padx=5)
+        
+        # NOVÉ: Heartbeat a čas
+        self.heartbeat_label = tk.Label(status_frame, textvariable=self.heartbeat_var, font=('Courier', 10, 'bold'), fg='#2980b9')
+        self.heartbeat_label.pack(side='left', padx=10)
+        
+        self.last_update_label = ttk.Label(status_frame, textvariable=self.last_update_time_var, font=('Arial', 8))
+        self.last_update_label.pack(side='left', padx=5)
         
         ttk.Button(status_frame, text="🔄 Test pripojenia", command=self.check_connection).pack(side='left', padx=10)
         
@@ -343,15 +377,81 @@ class SharedState:
             import yfinance as yf
             ticker = yf.Ticker(symbol)
             calendar = ticker.calendar
-            if calendar is not None and not calendar.empty:
-                # calendar['Earnings Date'] vracia zoznam dátumov (začiatok a koniec okna)
-                # Zoberieme ten prvý
-                e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
-                if e_dates is not None and len(e_dates) > 0:
+            if calendar:
+                e_dates = None
+                if isinstance(calendar, dict):
+                    e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
+                elif hasattr(calendar, 'empty') and not calendar.empty:
+                    # calendar['Earnings Date'] vracia zoznam dátumov (začiatok a koniec okna)
+                    # Zoberieme ten prvý
+                    e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
+                
+                if e_dates is not None and isinstance(e_dates, list) and len(e_dates) > 0:
                     return e_dates[0]
+                elif e_dates is not None:
+                    return e_dates
             return None
         except:
             return None
+    
+    def get_dividend_info(self, symbol):
+        """Získa informácie o najbližšej dividende (výška a ex-date)"""
+        if symbol in self.dividend_cache:
+            # Cache platí 12 hodín
+            data, ts = self.dividend_cache[symbol]
+            if (datetime.now() - ts).total_seconds() < 43200:
+                return data
+
+        try:
+            import yfinance as yf
+            import pandas as pd
+            ticker = yf.Ticker(symbol)
+            
+            # 1. Skúsime získať ex-date z kalendára
+            ex_date = None
+            cal = ticker.calendar
+            
+            if cal:
+                if isinstance(cal, dict):
+                    # Formát dictionary (novšie yfinance)
+                    ex_date = cal.get('Ex-Dividend Date') or cal.get('Dividend Date')
+                elif hasattr(cal, 'empty') and not cal.empty:
+                    # Formát DataFrame (staršie yfinance)
+                    if 'Ex-Dividend Date' in cal.index:
+                        ex_date = cal.loc['Ex-Dividend Date'].iloc[0]
+                    elif 'Dividend Date' in cal.index:
+                        ex_date = cal.loc['Dividend Date'].iloc[0]
+
+            # 2. Skúsime získať výšku dividendy (per payment)
+            div_rate = 0
+            divs = ticker.dividends
+            if divs is not None and len(divs) > 0:
+                div_rate = float(divs.iloc[-1])
+            else:
+                # Ak nie je história, skúsime info
+                info = ticker.info
+                annual_rate = info.get('dividendRate') or info.get('trailingAnnualDividendRate', 0)
+                div_rate = annual_rate / 4.0 if annual_rate > 0 else 0
+
+            # 3. Ak stále nemáme ex-date, skúsime info
+            if not ex_date:
+                info = ticker.info
+                ex_date_raw = info.get('exDividendDate')
+                if ex_date_raw:
+                    from datetime import date
+                    if isinstance(ex_date_raw, int):
+                        ex_date = date.fromtimestamp(ex_date_raw)
+                    else:
+                        try:
+                            ex_date = datetime.strptime(str(ex_date_raw), '%Y-%m-%d').date()
+                        except: pass
+
+            result = {'rate': div_rate, 'ex_date': ex_date}
+            self.dividend_cache[symbol] = (result, datetime.now())
+            return result
+        except Exception as e:
+            print(f"DEBUG: Dividend fetch failed for {symbol}: {e}")
+            return {'rate': 0, 'ex_date': None}
     
     def check_connection(self):
         """Otestuje pripojenie k TWS"""
@@ -575,6 +675,7 @@ class SharedState:
                     self.saved_gamma_scalper_strategies = data.get('gamma_scalper_strategies', {})
                     self.saved_gamma_semafor_configs = data.get('gamma_semafor_configs', {})
                     self.ticker_settings = data.get('ticker_settings', {}) # Načítaj nastavenia tickerov
+                    self.custom_pairs = data.get('custom_pairs', {}) # Načítaj definície párov
                     
                     # Načítaj globálne nastavenia Gamma Semaforu (len ako fallback, ak nie je vybratá konkrétna stratégia)
                     loaded_thresholds = data.get('gamma_semafor_thresholds', {})
@@ -602,6 +703,15 @@ class SharedState:
                         self.gs_semafor_config_notes_var.set("")
 
                     self.gs_model_priority_var.set(data.get('gs_model_priority', False))
+
+                    # Načítaj Swing Watcher nastavenia
+                    self.monitor_profit_target_pct.set(data.get('monitor_profit_target_pct', "50.0"))
+                    self.monitor_profit_warning_pct.set(data.get('monitor_profit_warning_pct', "30.0"))
+                    self.monitor_stock_profit_target_usd.set(data.get('monitor_stock_profit_target_usd', "12.0"))
+                    self.monitor_auto_close_var.set(data.get('monitor_auto_close_var', False))
+                    self.monitor_auto_restart_var.set(data.get('monitor_auto_restart_var', False))
+                    self.monitor_trailing_opt_pct.set(data.get('monitor_trailing_opt_pct', "5.0"))
+                    self.monitor_trailing_stk_usd.set(data.get('monitor_trailing_stk_usd', "2.0"))
 
                     # Načítaj uložené vybrané symboly pre monitor
                     loaded_selected_symbols = data.get('monitor_selected_symbols', [])
@@ -636,8 +746,16 @@ class SharedState:
                 'gamma_scalper_strategies': self.saved_gamma_scalper_strategies,
                 'gamma_semafor_configs': self.saved_gamma_semafor_configs,
                 'ticker_settings': self.ticker_settings, # Uložíme nastavenia tickerov
+                'custom_pairs': self.custom_pairs, # Uložíme definície párov
                 'default_gamma_semafor_config': self.gs_semafor_config_name_var.get(), # Uložíme poslednú použitú
                 'gs_model_priority': self.gs_model_priority_var.get(),
+                'monitor_profit_target_pct': self.monitor_profit_target_pct.get(),
+                'monitor_profit_warning_pct': self.monitor_profit_warning_pct.get(),
+                'monitor_stock_profit_target_usd': self.monitor_stock_profit_target_usd.get(),
+                'monitor_auto_close_var': self.monitor_auto_close_var.get(),
+                'monitor_auto_restart_var': self.monitor_auto_restart_var.get(),
+                'monitor_trailing_opt_pct': self.monitor_trailing_opt_pct.get(),
+                'monitor_trailing_stk_usd': self.monitor_trailing_stk_usd.get(),
                 'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()]
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:

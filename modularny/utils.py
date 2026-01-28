@@ -111,6 +111,36 @@ def get_time_to_expiry_years(expiry):
         return 7/365.0
 
 
+def is_market_stable(buffer_minutes=15):
+    """
+    Skontroluje, či je US trh (NYSE/NASDAQ) otvorený aspoň buffer_minutes.
+    US trh otvára o 15:30 SEČ (9:30 ET).
+    """
+    now = datetime.now()
+    # Len pracovné dni (0=Pondelok, 4=Piatok)
+    if now.weekday() > 4:
+        return False, "Víkend"
+
+    # US trhy otvárajú o 15:30 SEČ
+    # POZOR: Toto predpokladá, že robot beží v SEČ/stredoeurópskom čase
+    market_open = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=22, minute=0, second=0, microsecond=0)
+
+    # Ak je pred otvorením alebo po zatvorení
+    if now < market_open:
+        return False, f"Trh otvára o 15:30 (ešte {(market_open - now).seconds // 60} min)"
+    if now > market_close:
+        return False, "Trh je už zatvorený"
+
+    # Kontrola stability (buffer po otvorení)
+    minutes_since_open = (now - market_open).total_seconds() / 60
+    if minutes_since_open < buffer_minutes:
+        remaining = int(buffer_minutes - minutes_since_open)
+        return False, f"Stabilizácia trhu (ešte {remaining} min)"
+
+    return True, "OK"
+
+
 def find_strike_for_delta(option_type, target_delta, expiry, iv, r, underlying):
     """Hľadá strike tak, aby delta(option, K) == target_delta"""
     try:
