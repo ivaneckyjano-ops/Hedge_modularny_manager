@@ -219,6 +219,9 @@ def update_watcher_tree(state, rows):
     """Aktualizuje tabuľku Swing Profit Watcher s rozdelením na Páry a Natural skupiny"""
     if not hasattr(state, 'monitor_watcher_tree'): return
     
+    # Synchronizácia zoznamu párov (ak by náhodou vypadol)
+    refresh_pairs_listbox(state)
+    
     tree = state.monitor_watcher_tree
     
     # 0. Uložiť stav rozbalenia
@@ -468,10 +471,40 @@ def create_swing_watcher_tab(parent, state):
     state.monitor_pairs_listbox.configure(yscrollcommand=lb_sb.set)
     
     refresh_pairs_listbox(state)
-    
-    btn_p_del = ttk.Button(p_list_frame, text="🗑️ Vymazať vybraný", 
+
+    def load_selected_pair(event=None):
+        selection = state.monitor_pairs_listbox.curselection()
+        if not selection: return
+        
+        full_text = state.monitor_pairs_listbox.get(selection[0])
+        pair_name = full_text.split(" (")[0]
+        
+        if pair_name in state.custom_pairs:
+            data = state.custom_pairs[pair_name]
+            p_name_var.set(pair_name)
+            p_syms_var.set(", ".join(data.get('symbols', [])))
+            p_target_var.set(str(data.get('target_usd', '')))
+            p_opt_target_var.set(str(data.get('opt_target_pct', '')))
+            p_stk_target_var.set(str(data.get('stk_target_usd', '')))
+
+    def clear_pair_fields():
+        p_name_var.set("")
+        p_syms_var.set("")
+        p_target_var.set("")
+        p_opt_target_var.set("")
+        p_stk_target_var.set("")
+
+    state.monitor_pairs_listbox.bind("<<ListboxSelect>>", load_selected_pair)
+
+    btn_grid = ttk.Frame(p_list_frame)
+    btn_grid.pack(fill='x', pady=(5, 0))
+
+    btn_p_del = ttk.Button(btn_grid, text="🗑️ Vymazať vybraný", 
                            command=lambda: [delete_custom_pair(state, state.monitor_pairs_listbox.get(s).split(" (")[0]) if (s:=state.monitor_pairs_listbox.curselection()) else None])
-    btn_p_del.pack(pady=(5, 0))
+    btn_p_del.pack(side='left', padx=5, expand=True)
+
+    btn_p_clear = ttk.Button(btn_grid, text="🧹 Vyčistiť polia", command=clear_pair_fields)
+    btn_p_clear.pack(side='left', padx=5, expand=True)
 
     table_label = ttk.Label(frame, text="📊 Profit Guard Monitoring", font=('Arial', 10, 'bold'))
     table_label.pack(fill='x', pady=(10, 0))
