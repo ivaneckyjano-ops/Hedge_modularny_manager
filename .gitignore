@@ -18,3 +18,10 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# App Cache and Logs
+cache/
+*.json
+!settings_archive.json
+!package.json
+!package-lock.json

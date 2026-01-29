@@ -46,6 +46,8 @@ def main():
     try:
         client_id = random.randint(140, 199)
         ib.connect('127.0.0.1', args.port, clientId=client_id, timeout=15)
+        ib.reqMarketDataType(3) 
+        ib.reqMarketDataType(4)
         
         contract = None
         mode = "Unknown"
@@ -54,13 +56,13 @@ def main():
         if args.call_strike is not None and args.put_strike is not None:
             # STRANGLE COMBO (Dve nohy)
             mode = "Combo"
-            c_leg = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD')
-            p_leg = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD')
+            c_leg = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD', multiplier='100')
+            p_leg = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD', multiplier='100')
             
             qualified = ib.qualifyContracts(c_leg, p_leg)
             if len(qualified) < 2:
                 print(json.dumps({'success': False, 'error': f'Nepodarilo sa overiť opčné kontrakty pre {args.symbol} {args.expiry}.'}))
-                return
+                sys.exit(1)
 
             legs = [
                 ComboLeg(conId=c_leg.conId, ratio=1, action=args.action, exchange='SMART'),
@@ -72,18 +74,24 @@ def main():
         elif args.call_strike is not None:
             # SINGLE CALL
             mode = "Call"
-            contract = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD')
-            ib.qualifyContracts(contract)
+            contract = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD', multiplier='100')
+            qualified = ib.qualifyContracts(contract)
+            if not qualified or not contract.conId:
+                print(json.dumps({'success': False, 'error': f'Nepodarilo sa overiť Call kontrakt pre {args.symbol} strike {args.call_strike}.'}))
+                sys.exit(1)
             
         elif args.put_strike is not None:
             # SINGLE PUT
             mode = "Put"
-            contract = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD')
-            ib.qualifyContracts(contract)
+            contract = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD', multiplier='100')
+            qualified = ib.qualifyContracts(contract)
+            if not qualified or not contract.conId:
+                print(json.dumps({'success': False, 'error': f'Nepodarilo sa overiť Put kontrakt pre {args.symbol} strike {args.put_strike}.'}))
+                sys.exit(1)
         
         if not contract:
             print(json.dumps({'success': False, 'error': 'Musíte zadať aspoň jeden strike (--call-strike alebo --put-strike).'}))
-            return
+            sys.exit(1)
 
         # 2. Získanie ceny pre Limit Order
         price = 0.0
@@ -91,8 +99,8 @@ def main():
         ticker = ib.reqMktData(contract, '106', False, False)
         
         start = time.time()
-        while time.time() - start < 4:
-            ib.sleep(0.2)
+        while time.time() - start < 5:
+            ib.sleep(0.5)
             # Pre BUY chceme Ask, pre SELL chceme Bid
             if args.action == 'BUY':
                 if ticker.ask > 0 and not math.isnan(ticker.ask): price = ticker.ask; source="Ask"; break
@@ -108,10 +116,17 @@ def main():
         # 3. Vytvorenie objednávky
         if price > 0:
             # Buffer pre Limit: BUY (+5%), SELL (-5%)
-            limit_price = round(price * 1.05, 2) if args.action == 'BUY' else round(price * 0.95, 2)
+            # ALEBO aspoň 0.05 USD posun pre istotu
+            if args.action == 'BUY':
+                limit_price = max(round(price * 1.05, 2), price + 0.05)
+            else:
+                limit_price = min(round(price * 0.95, 2), price - 0.05)
+                if limit_price < 0.01: limit_price = 0.01
+            
             order = LimitOrder(args.action, quantity, limit_price)
             order_type_msg = f"Limit Order @ {limit_price} (Ref: {price:.2f} {source})"
         else:
+            # Ak nenájdeme cenu, skúsime aspoň Market Order ale len ak je to povolené
             order = MarketOrder(args.action, quantity)
             order_type_msg = "Market Order (No Price Found)"
         
@@ -121,8 +136,8 @@ def main():
 
         trade = ib.placeOrder(contract, order)
         
-        # Sledovanie stavu
-        for _ in range(10):
+        # Sledovanie stavu (dlhšie čakanie pre istotu)
+        for _ in range(20):
             ib.sleep(0.5)
             if trade.orderStatus.status in ('Submitted', 'PreSubmitted', 'Filled'): break
             if trade.orderStatus.status in ('Cancelled', 'Inactive', 'Rejected'): break
@@ -133,8 +148,8 @@ def main():
                  for entry in reversed(trade.log):
                      if entry.message: reason = entry.message; break
              
-             print(json.dumps({'success': False, 'error': f'TWS Error: {trade.orderStatus.status} - {reason}'}))
-             return
+             print(json.dumps({'success': False, 'error': f'TWS Error: {trade.orderStatus.status} - {reason}', 'contract': str(contract)}))
+             sys.exit(1)
 
         print(json.dumps({
             'success': True,
@@ -149,6 +164,7 @@ def main():
         
     except Exception as e:
         print(json.dumps({'success': False, 'error': str(e)}))
+        sys.exit(1)
     finally:
         if ib.isConnected(): ib.disconnect()
 

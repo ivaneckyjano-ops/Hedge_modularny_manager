@@ -13,6 +13,7 @@ import json
 import sys
 import math
 import traceback
+import time
 from datetime import datetime
 
 from modularny.utils import is_market_stable
@@ -994,10 +995,15 @@ def update_stats_ui(state, symbol=None):
         state.gs_scalp_stats_label.config(text=f"Skalpy: {c} | Cash Flow: ${cf:+.2f}", foreground=col)
 
 def check_position_gs(state):
-    # Získame vybrané symboly z monitora
+    # Získame vybrané symboly z monitora + automaticky symboly z vlastných párov
     selected_monitor_symbols = [sym for sym, var in state.monitor_selected_symbols.items() if var.get()]
+    for pair_data in state.custom_pairs.values():
+        pair_syms = pair_data.get('symbols', []) if isinstance(pair_data, dict) else pair_data
+        for ps in pair_syms:
+            if ps not in selected_monitor_symbols:
+                selected_monitor_symbols.append(ps)
 
-    # Ak nie sú vybrané žiadne symboly v monitore, tak monitorujeme všetko (pôvodné správanie)
+    # Ak nie sú vybrané žiadne symboly v monitore ani v pároch, tak monitorujeme všetko
     if not selected_monitor_symbols:
         selection = state.gs_active_sym_combo.get().strip()
         is_multi = selection == "--- VŠETKO (MULTI) ---" or not selection
@@ -1056,9 +1062,13 @@ def check_position_gs(state):
                 
                 # Spracujeme každý symbol v portfóliu
                 for sym in sorted(portfolio.keys()):
-                    # BEZPEČNOSTNÝ FILTER: Ignorovať symboly bez opcií (čisté akcie)
+                    # Symboly z vlastných párov (cross-hedge)
+                    is_in_custom_pair = any(sym in (p.get('symbols', []) if isinstance(p, dict) else p) for p in state.custom_pairs.values())
+
+                    # BEZPEČNOSTNÝ FILTER: Ignorovať symboly bez opcií (čisté akcie),
+                    # OKREM tých, ktoré sú súčasťou vlastného páru
                     has_options = any(exp != "STK" for exp in portfolio[sym].keys())
-                    if not has_options:
+                    if not has_options and not is_in_custom_pair:
                         continue
                         
                     # Ak nie sme v multi režime, spracujeme roboticky len vybraný symbol, 
@@ -1091,6 +1101,7 @@ def check_position_gs(state):
                             pl_display = ""
                             is_target = False
                             is_warning = False
+                            pl_pct = 0.0 # Inicializácia
                             
                             # KRÍŽOVÁ KONTROLA (Cross-Check) proti TWS
                             is_verified = False
@@ -1100,7 +1111,6 @@ def check_position_gs(state):
                                 avg_price_share = avg_cost / 100.0
                                 calc_pnl = (mkt_price - avg_price_share) * pos * 100.0
                                 
-                                pl_pct = 0.0
                                 if pos < 0 and avg_cost > 0:
                                     # Prijatá prémia (max profit) = abs(pos) * avg_cost
                                     max_profit = abs(pos) * avg_cost
@@ -1123,6 +1133,11 @@ def check_position_gs(state):
                                 display_avg = f"{avg_price_share:.2f}"
                             else: # STK
                                 calc_pnl = (mkt_price - avg_cost) * pos
+                                # Výpočet % aj pre akcie pre kompatibilitu so Swing Watcherom
+                                if abs(pos) > 0 and avg_cost > 0:
+                                    cost_basis = abs(pos) * avg_cost
+                                    pl_pct = (unr_pl / cost_basis) * 100.0
+
                                 pl_display = f"{unr_pl:+.2f} $"
                                 target_display = f"{target_stk_usd:+.1f} $"
                                 is_target = unr_pl >= target_stk_usd
@@ -1132,7 +1147,19 @@ def check_position_gs(state):
                                     is_verified = True
                                 display_avg = f"{avg_cost:.2f}"
 
-                            desc = f"{p.get('right','')}{p.get('strike','')}" if st == 'OPT' else "AKCIE"
+                            if st == 'OPT':
+                                exp_raw = str(p.get('expiry', ''))
+                                try:
+                                    # Prevod YYYYMMDD na "Jun 30"
+                                    dt = datetime.strptime(exp_raw, "%Y%m%d")
+                                    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                                    exp_fmt = f"{months[dt.month-1]} {dt.day:02d}"
+                                    desc = f"{exp_fmt} {p.get('right','')}{p.get('strike','')}"
+                                except:
+                                    desc = f"{exp_raw} {p.get('right','')}{p.get('strike','')}"
+                            else:
+                                desc = "AKCIE"
+
                             watcher_rows.append({
                                 'sym': sym, 'desc': desc, 'pos': f"{pos:+.0f}",
                                 'price': f"{mkt_price:.2f}", 'avg': display_avg,
@@ -1140,7 +1167,7 @@ def check_position_gs(state):
                                 'target_display': target_display, 'is_target': is_target,
                                 'is_warning': is_warning, 'is_loss': unr_pl < 0,
                                 'is_verified': is_verified, 'secType': st,
-                                'raw_pl_usd': unr_pl, 'raw_pl_pct': pl_pct if st == 'OPT' else 0
+                                'raw_pl_usd': unr_pl, 'raw_pl_pct': pl_pct
                             })
 
                             val_d = d * pos if p.get('secType') == 'OPT' else (pos / 100.0)
@@ -1354,8 +1381,15 @@ def check_position_gs(state):
                      final_report.append("\nℹ️ Žiadne Gamma Scalper stratégie (s opciami) nenájdené.")
 
                 update_gs_monitor_text(state, "\n".join(final_report))
-                # AKTUALIZÁCIA SWING WATCHERA
-                state.root.after(0, lambda: update_watcher_tree(state, watcher_rows))
+                
+                # AKTUALIZÁCIA SWING WATCHERA A HUNTERA
+                state.root.after(0, lambda: [
+                    update_watcher_tree(state, watcher_rows),
+                    # Automaticky zaktualizovať aj Huntera, ak máme referencie
+                    getattr(sys.modules.get('modularny.tab_swing_hunter'), 'refresh_hunter')(
+                        state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v
+                    ) if hasattr(state, 'hunter_tree') else None
+                ])
                 
                 # --- HEARTBEAT & ČAS ---
                 def pulse():
@@ -1363,6 +1397,8 @@ def check_position_gs(state):
                     new_h = "[ • ]" if "OK" in current_h else "[ OK ]"
                     state.heartbeat_var.set(new_h)
                     state.last_update_time_var.set(f"Aktualizované: {timestamp}")
+                    # Uložiť timestamp pre watchdog
+                    state.last_monitor_success_time = time.time()
                 state.root.after(0, pulse)
                 
             # Naplánovať ďalšiu kontrolu
@@ -1449,6 +1485,23 @@ def create_gs_semafor_tab(parent, state):
     refresh(); state.refresh_gs_semafor_tree = refresh
     ttk.Button(frame, text="🗑️ Vymazať", command=lambda: [state.delete_gamma_semafor_config(state.gs_semafor_config_name_var), refresh()]).pack(pady=5)
 
+def check_monitor_watchdog(state):
+    """Sleduje, či sa monitor nezasekol (beží každých 5s)"""
+    if state.gs_auto_monitor_var.get():
+        last_success = getattr(state, 'last_monitor_success_time', 0)
+        now = time.time()
+        
+        # Ak od poslednej aktualizácie prešlo viac ako 65 sekúnd (interval je 30s)
+        if last_success > 0 and (now - last_success) > 65:
+            update_gs_status(state, "🛑 MONITOR ZASEKNUTÝ!", "red")
+            state.heartbeat_var.set("[ !! ]")
+        elif last_success == 0 and state.gs_auto_monitor_var.get():
+            # Ešte neprebehla ani jedna úspešná aktualizácia
+            update_gs_status(state, "⏳ Čakám na prvé dáta...", "orange")
+    
+    # Naplánovať ďalšiu kontrolu o 5 sekúnd
+    state.root.after(5000, lambda: check_monitor_watchdog(state))
+
 def create_gamma_scalper_tab(parent, state):
     state.gs_notebook = ttk.Notebook(parent); state.gs_notebook.pack(fill='both', expand=True)
     t1 = ttk.Frame(state.gs_notebook); state.gs_notebook.add(t1, text="🔍 Vyhľadávač"); create_gs_finder_tab(t1, state)
@@ -1456,6 +1509,9 @@ def create_gamma_scalper_tab(parent, state):
     t3 = ttk.Frame(state.gs_notebook); state.gs_notebook.add(t3, text="🤖 Auto-Monitor"); create_gs_monitor_tab(t3, state)
     t4 = ttk.Frame(state.gs_notebook); state.gs_notebook.add(t4, text="🚦 Semafor"); create_gs_semafor_tab(t4, state)
     t5 = ttk.Frame(state.gs_notebook); state.gs_notebook.add(t5, text="🧠 AI Advisor"); create_gs_advisor_tab(t5, state)
+    
+    # Spustiť watchdog
+    state.root.after(5000, lambda: check_monitor_watchdog(state))
 
 def create_gs_advisor_tab(parent, state):
     frame = ttk.Frame(parent, padding=15); frame.pack(fill='both', expand=True)

@@ -62,6 +62,7 @@ def execute_auto_close(state, row_data):
         portfolio = getattr(state, 'last_portfolio_data', {})
         target_p = None
         
+        # ... (získanie target_p ostáva rovnaké) ...
         if symbol in portfolio:
             items = portfolio[symbol]
             if isinstance(items, dict):
@@ -76,14 +77,18 @@ def execute_auto_close(state, row_data):
                     break
         
         if not target_p:
-            print(f"❌ AUTO-CLOSE Error: Nenašla sa pozícia {row_data['desc']} pre {symbol}.")
+            print(f"❌ AUTO-CLOSE Error: Nenašla sa pozícia {row_data['desc']} for {symbol}.")
             setattr(state, sent_key, False)
+            # Ak sa pozícia nenašla, možno už je zatvorená, zmažeme peak
+            pos_key = f"{symbol}_{desc}"
+            if pos_key in state.trailing_peaks: del state.trailing_peaks[pos_key]
             return
 
         scr = os.path.join(root, 'scripts', 'tws_place_order.py')
         qty = abs(int(float(target_p.get('position', 0))))
         st = target_p.get('secType')
         
+        # ... (príprava cmd ostáva rovnaká) ...
         if st == 'OPT':
             action = "BUY" if float(target_p.get('position', 0)) < 0 else "SELL"
             cmd = [py, scr, '--symbol', symbol, '--expiry', str(target_p.get('expiry', '')),
@@ -100,29 +105,50 @@ def execute_auto_close(state, row_data):
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=root)
         
         if res.returncode == 0:
-            print(f"✅ TWS Response: {res.stdout}")
-            
-            if restart_mode and st == 'OPT':
-                open_action = "SELL" if action == "BUY" else "BUY"
-                open_cmd = [py, scr, '--symbol', symbol, '--expiry', str(target_p.get('expiry', '')),
-                            '--action', open_action, '--qty', str(qty), '--port', str(state.port_var.get())]
-                if target_p.get('right') == 'C': open_cmd.extend(['--call-strike', str(target_p.get('strike'))])
-                else: open_cmd.extend(['--put-strike', str(target_p.get('strike'))])
-                if is_live: open_cmd.append('--live')
-                
-                print(f"🔄 RE-ENTRY: Opening same position for {symbol} at current price...")
-                time.sleep(2)
-                subprocess.run(open_cmd, capture_output=True, text=True, timeout=30, cwd=root)
+            try:
+                data = json.loads(res.stdout.strip())
+                if data.get('success'):
+                    print(f"✅ TWS Response: {res.stdout}")
+                    
+                    # ÚSPECH: Teraz môžeme zmazať peak a nechať aktívny cooldown
+                    pos_key = f"{symbol}_{desc}"
+                    if pos_key in state.trailing_peaks: del state.trailing_peaks[pos_key]
+                    
+                    if restart_mode and st == 'OPT':
+                        # ... (re-entry logika ostáva rovnaká) ...
+                        open_action = "SELL" if action == "BUY" else "BUY"
+                        open_cmd = [py, scr, '--symbol', symbol, '--expiry', str(target_p.get('expiry', '')),
+                                    '--action', open_action, '--qty', str(qty), '--port', str(state.port_var.get())]
+                        if target_p.get('right') == 'C': open_cmd.extend(['--call-strike', str(target_p.get('strike'))])
+                        else: open_cmd.extend(['--put-strike', str(target_p.get('strike'))])
+                        if is_live: open_cmd.append('--live')
+                        print(f"🔄 RE-ENTRY: Opening same position for {symbol}...")
+                        time.sleep(2)
+                        subprocess.run(open_cmd, capture_output=True, text=True, timeout=30, cwd=root)
 
-            msg = f"Príkaz na {symbol} {row_data['desc']} bol odoslaný."
-            if restart_mode: msg += " (Cyklus reštartovaný)"
-            else: msg += " (Hedging vypnutý)"
-            
-            if not getattr(state, '_silent_auto_close', False):
-                state.root.after(0, lambda: messagebox.showinfo("Profit Action", msg))
+                    msg = f"Príkaz na {symbol} {row_data['desc']} bol odoslaný."
+                    if restart_mode: msg += " (Cyklus reštartovaný)"
+                    else: msg += " (Hedging vypnutý)"
+                    if not getattr(state, '_silent_auto_close', False):
+                        state.root.after(0, lambda: messagebox.showinfo("Profit Action", msg))
+                else:
+                    # LOGICKÁ CHYBA (napr. zlá cena): Resetujeme flagy aby to robot skúsil znova
+                    setattr(state, sent_key, False)
+                    setattr(state, cooldown_key, 0) 
+                    print(f"❌ TWS Logical Error: {data.get('error')}")
+            except:
+                setattr(state, sent_key, False)
+                setattr(state, cooldown_key, 0)
         else:
-            print(f"❌ TWS Order Error: {res.stderr}")
+            # CRASH SKRIPTU: Resetujeme flagy
             setattr(state, sent_key, False)
+            setattr(state, cooldown_key, 0)
+            print(f"❌ TWS Script Crash: {res.stderr}")
+
+    except Exception as e:
+        setattr(state, sent_key, False)
+        setattr(state, cooldown_key, 0)
+        print(f"❌ Auto-Close Exception: {e}")
 
     except Exception as e:
         import traceback
@@ -144,6 +170,10 @@ def execute_group_auto_close(state, pair_name, pair_rows):
         for r in pair_rows:
             execute_auto_close(state, r)
         
+        # Ak boli všetky úspešne poslané, môžeme zmazať peak páru
+        peak_key = f"pair_{pair_name}"
+        if peak_key in state.trailing_peaks: del state.trailing_peaks[peak_key]
+
         state.root.after(0, lambda: messagebox.showinfo("Group Profit Locked", 
             f"Všetky pozície v páre '{pair_name}' boli uzavreté a hedging zastavený."))
     finally:
@@ -305,7 +335,7 @@ def update_watcher_tree(state, rows):
                 trail_dist = float(state.monitor_trailing_stk_usd.get() or 2.0)
                 if total_pl <= (new_peak - trail_dist):
                     is_group_target = True
-                    del state.trailing_peaks[peak_key]
+                    # Peak zmažeme až v execute_group_auto_close po úspechu
             else:
                 if peak_key in state.trailing_peaks: del state.trailing_peaks[peak_key]
 
@@ -344,8 +374,18 @@ def update_watcher_tree(state, rows):
             if eff_target == 0:
                 eff_target = float(state.monitor_profit_target_pct.get()) if is_opt else float(state.monitor_stock_profit_target_usd.get())
 
+            # Rozhodujúca hodnota pre trigger (USD pre akcie, % pre opcie)
             current_val = r.get('raw_pl_pct', 0) if is_opt else r.get('raw_pl_usd', 0)
             
+            # Špeciálne zobrazenie pre kompatibilitu: Akcie ukazujú USD aj %, Opcie len %
+            pl_display = r['pl_display'] # Toto je z tab_monitor
+            if not is_opt:
+                # Pre akcie pridáme k USD aj % do zobrazenia, ak je raw_pl_pct k dispozícii
+                if r.get('raw_pl_pct', 0) != 0:
+                    pl_display = f"{r['pl_usd']} ({r['raw_pl_pct']:.2f} %)"
+                else:
+                    pl_display = r['pl_usd']
+
             if current_val >= eff_target:
                 is_row_trailing = True
                 cur_peak = state.trailing_peaks.get(pos_key, eff_target)
@@ -355,7 +395,7 @@ def update_watcher_tree(state, rows):
                 t_dist = float(state.monitor_trailing_opt_pct.get() if is_opt else state.monitor_trailing_stk_usd.get())
                 if current_val <= (new_peak - t_dist):
                     is_row_triggered = True
-                    del state.trailing_peaks[pos_key]
+                    # del state.trailing_peaks[pos_key]  <-- ODSTRÁNENÉ: Peak zmažeme až po úspešnom obchode v execute_auto_close
             else:
                 if pos_key in state.trailing_peaks: del state.trailing_peaks[pos_key]
 
@@ -363,7 +403,24 @@ def update_watcher_tree(state, rows):
                 if is_row_triggered:
                     tags.append('target')
                     if state.monitor_auto_close_var.get():
-                        threading.Thread(target=execute_auto_close, args=(state, r), daemon=True).start()
+                        # --- MARGIN GUARD LOGIKA ---
+                        try:
+                            qty_val = float(r['pos'].replace('+', ''))
+                            is_long = qty_val > 0
+                            
+                            # Skontrolujeme, či v tejto skupine sú nejaké shorty
+                            has_shorts_in_group = any(float(row['pos'].replace('+', '')) < 0 for row in group_rows)
+                            
+                            if is_custom and is_long and has_shorts_in_group:
+                                # Ak je to Long a spread má shorty, zatvoríme VŠETKO pre bezpečnosť marže
+                                print(f"🛡️ MARGIN GUARD: {r['sym']} {r['desc']} hit target, but group {name} has shorts. Closing WHOLE PAIR.")
+                                threading.Thread(target=execute_group_auto_close, args=(state, name, group_rows), daemon=True).start()
+                            else:
+                                # Ak je to short alebo "čistý" long spread, zatvoríme len túto nohu
+                                threading.Thread(target=execute_auto_close, args=(state, r), daemon=True).start()
+                        except Exception as me:
+                            print(f"Margin Guard Error: {me}")
+                            threading.Thread(target=execute_auto_close, args=(state, r), daemon=True).start()
                 elif is_row_trailing:
                     tags.append('trailing')
                     row_target_display = f"TRAIL ({new_peak:.1f}{'%' if is_opt else '$'})"
@@ -375,7 +432,7 @@ def update_watcher_tree(state, rows):
             v_ico = "✓ " if r.get('is_verified') else "⚠️ "
             tree.insert(node_id, tk.END, text="", values=(
                 f"{v_ico}{r['sym']}", r['desc'], r['pos'], r['price'], r['avg'], 
-                r['pl_usd'], r['pl_display'], row_target_display
+                r['pl_usd'], pl_display, row_target_display
             ), tags=tags)
             
         if f"{icon}{name}" in expanded_items:
@@ -404,26 +461,37 @@ def create_swing_watcher_tab(parent, state):
     w_ctrl = ttk.LabelFrame(frame, text="⚙️ Nastavenia automatického výstupu", padding=10)
     w_ctrl.pack(fill='x', pady=5)
     
-    ttk.Label(w_ctrl, text="🔔 Warning (%):").pack(side='left', padx=5)
-    ttk.Entry(w_ctrl, textvariable=state.monitor_profit_warning_pct, width=5).pack(side='left', padx=2)
-
-    ttk.Label(w_ctrl, text="🎯 Option Target (%):").pack(side='left', padx=(15, 5))
-    ttk.Entry(w_ctrl, textvariable=state.monitor_profit_target_pct, width=5).pack(side='left', padx=2)
-
-    ttk.Label(w_ctrl, text="💰 Stock Target ($):").pack(side='left', padx=(15, 5))
-    ttk.Entry(w_ctrl, textvariable=state.monitor_stock_profit_target_usd, width=6).pack(side='left', padx=2)
+    # Prvý riadok nastavení
+    row1 = ttk.Frame(w_ctrl)
+    row1.pack(fill='x', pady=2)
     
-    ttk.Checkbutton(w_ctrl, text="🤖 AUTO-TAKE PROFIT (Exit + Stop Hedger)", 
+    ttk.Label(row1, text="🔔 Warning (%):").pack(side='left', padx=5)
+    ttk.Entry(row1, textvariable=state.monitor_profit_warning_pct, width=5).pack(side='left', padx=2)
+
+    ttk.Label(row1, text="🎯 Option Target (%):").pack(side='left', padx=(15, 5))
+    ttk.Entry(row1, textvariable=state.monitor_profit_target_pct, width=5).pack(side='left', padx=2)
+
+    ttk.Label(row1, text="💰 Stock Target ($):").pack(side='left', padx=(15, 5))
+    ttk.Entry(row1, textvariable=state.monitor_stock_profit_target_usd, width=6).pack(side='left', padx=2)
+    
+    ttk.Checkbutton(row1, text="🤖 AUTO-TAKE PROFIT", 
                     variable=state.monitor_auto_close_var).pack(side='left', padx=20)
     
-    ttk.Checkbutton(w_ctrl, text="🔄 RESTART CYCLE (Re-open after Exit)", 
+    ttk.Checkbutton(row1, text="🔄 RESTART CYCLE", 
                     variable=state.monitor_auto_restart_var).pack(side='left', padx=5)
 
-    ttk.Label(w_ctrl, text="📉 Trail OPT (%):").pack(side='left', padx=(15, 5))
-    ttk.Entry(w_ctrl, textvariable=state.monitor_trailing_opt_pct, width=4).pack(side='left', padx=2)
+    # Druhý riadok nastavení (Trailing Stop)
+    row2 = ttk.Frame(w_ctrl)
+    row2.pack(fill='x', pady=2)
 
-    ttk.Label(w_ctrl, text="📉 Trail STK ($):").pack(side='left', padx=(10, 5))
-    ttk.Entry(w_ctrl, textvariable=state.monitor_trailing_stk_usd, width=4).pack(side='left', padx=2)
+    ttk.Label(row2, text="📉 Trailing Distance - OPT (%):", font=('Arial', 9, 'bold')).pack(side='left', padx=5)
+    ttk.Entry(row2, textvariable=state.monitor_trailing_opt_pct, width=5).pack(side='left', padx=2)
+
+    ttk.Label(row2, text="📉 Trailing Distance - STK ($):", font=('Arial', 9, 'bold')).pack(side='left', padx=(25, 5))
+    ttk.Entry(row2, textvariable=state.monitor_trailing_stk_usd, width=5).pack(side='left', padx=2)
+    
+    ttk.Label(row2, text="💡 (O koľko musí zisk klesnúť z vrcholu, aby sa predalo)", 
+              font=('Arial', 8, 'italic'), foreground='gray').pack(side='left', padx=15)
 
     p_mgr_frame = ttk.PanedWindow(frame, orient='horizontal')
     p_mgr_frame.pack(fill='x', pady=5)
@@ -517,7 +585,7 @@ def create_swing_watcher_tab(parent, state):
     
     tree.heading('#0', text='Pár / Skupina'); tree.column('#0', width=150, anchor='w')
     tree.heading('sym', text='Symbol'); tree.column('sym', width=80, anchor='center')
-    tree.heading('desc', text='Popis pozície'); tree.column('desc', width=150, anchor='w')
+    tree.heading('desc', text='Popis pozície'); tree.column('desc', width=250, anchor='w')
     tree.heading('pos', text='Ks'); tree.column('pos', width=60, anchor='center')
     tree.heading('mkt', text='Trh. Cena'); tree.column('mkt', width=100, anchor='center')
     tree.heading('avg', text='Nákupná Cena'); tree.column('avg', width=100, anchor='center')

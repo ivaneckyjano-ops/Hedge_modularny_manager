@@ -187,6 +187,9 @@ class SharedState:
         # Monitor - vybrané symboly na hedžovanie
         self.monitor_selected_symbols = {} # Slovník sym -> tk.BooleanVar
         
+        # NOVÉ: Swing Hunter - vybrané symboly na lov signálov
+        self.hunter_selected_symbols = {} # Slovník sym -> tk.BooleanVar
+        
         # NOVÉ: Swing Profit Watcher nastavenia
         self.monitor_profit_target_pct = tk.StringVar(value="50.0") # Cieľ pre zatvorenie opcií
         self.monitor_profit_warning_pct = tk.StringVar(value="30.0") # Cieľ pre upozornenie opcií
@@ -315,8 +318,48 @@ class SharedState:
         self.gamma_status_label = ttk.Label(status_frame, textvariable=self.gamma_status_var, font=('Arial', 9))
         self.gamma_status_label.pack(side='right', padx=5)
         
+        # ⚡ AKTUALIZOVAŤ VŠETKO (Schodišťový vypínač)
+        btn_refresh = ttk.Button(status_frame, text="⚡ AKTUALIZOVAŤ VŠETKO", command=self.refresh_all)
+        btn_refresh.pack(side='right', padx=10)
+
         # Inicializuj indikátor
         self.update_profile_indicator()
+
+    def refresh_all(self):
+        """Globálna aktualizácia všetkých modulov naraz"""
+        try:
+            from modularny.tab_monitor import check_position
+            from modularny.tab_gamma_scalper import check_position_gs
+            
+            # Získame vybrané symboly
+            selected = [sym for sym, var in self.monitor_selected_symbols.items() if var.get()]
+            for pair_data in self.custom_pairs.values():
+                pair_syms = pair_data.get('symbols', []) if isinstance(pair_data, dict) else pair_data
+                for ps in pair_syms:
+                    if ps not in selected:
+                        selected.append(ps)
+            
+            # 1. Aktualizovať hlavný monitor
+            check_position(self, selected)
+            
+            # 2. Aktualizovať robotický monitor (Gamma Scalper)
+            check_position_gs(self)
+
+            # 3. Aktualizovať Swing Hunter (ak existuje)
+            try:
+                import modularny.tab_swing_hunter as hunter
+                if hasattr(self, 'hunter_tree') and hasattr(self, 'hunter_rsi_p') and hasattr(self, 'hunter_rvi_p') and hasattr(self, 'hunter_tf_v'):
+                    # Tu necháme force=False, aby sa využila cache
+                    hunter.refresh_hunter(self, self.hunter_tree, self.hunter_rsi_p, self.hunter_rvi_p, self.hunter_tf_v, force=False)
+            except: pass
+            
+            # Reset heartbeat indikátora pre vizuálnu odozvu
+            self.heartbeat_var.set("[⚡⚡]")
+            self.root.after(1000, lambda: self.heartbeat_var.set("[ OK ]"))
+            
+            print("🚀 GLOBAL REFRESH: Spustená kompletná aktualizácia.")
+        except Exception as e:
+            print(f"Chyba pri globálnej aktualizácii: {e}")
 
     def update_profile_indicator(self):
         """Aktualizuje indikátor profilu v status bare"""

@@ -44,7 +44,7 @@ def check_position(state, selected_symbols=None):
             scr = os.path.join(root, 'scripts', 'tws_manual_test.py')
             env = {**os.environ, 'TWS_PORT': state.port_var.get()}
             
-            res = subprocess.run([py, scr, '--mode', 'positions'], capture_output=True, text=True, timeout=20, cwd=root, env=env)
+            res = subprocess.run([py, scr, '--mode', 'positions'], capture_output=True, text=True, timeout=60, cwd=root, env=env)
             
             if res.returncode != 0:
                 error_msg = res.stderr if res.stderr else "Neznáma chyba"
@@ -129,10 +129,10 @@ def check_position(state, selected_symbols=None):
                         # Logika pre Watchera (rovnaká ako v Gamma Scalper)
                         is_verified = False
                         calc_pnl = 0.0
+                        pl_pct = 0.0 # Inicializácia pre oba typy
                         if st == 'OPT':
                             avg_price_share = avg_cost / 100.0
                             calc_pnl = (mkt_price - avg_price_share) * pos * 100.0
-                            pl_pct = 0.0
                             if pos < 0 and avg_cost > 0:
                                 max_profit = abs(pos) * avg_cost
                                 pl_pct = (unr_pl / max_profit) * 100.0 if max_profit > 0 else 0
@@ -148,6 +148,11 @@ def check_position(state, selected_symbols=None):
                             display_avg = f"{avg_price_share:.2f}"
                         else:
                             calc_pnl = (mkt_price - avg_cost) * pos
+                            # Výpočet % aj pre akcie
+                            if abs(pos) > 0 and avg_cost > 0:
+                                cost_basis = abs(pos) * avg_cost
+                                pl_pct = (unr_pl / cost_basis) * 100.0
+                            
                             pl_display = f"{unr_pl:+.2f} $"
                             target_display = f"{target_stk_usd:+.1f} $"
                             is_target = unr_pl >= target_stk_usd
@@ -155,7 +160,19 @@ def check_position(state, selected_symbols=None):
                             if abs(calc_pnl - unr_pl) < (abs(unr_pl) * 0.01 + 0.10): is_verified = True
                             display_avg = f"{avg_cost:.2f}"
 
-                        desc = f"{p.get('right','')}{p.get('strike','')}" if st == 'OPT' else "AKCIE"
+                        if st == 'OPT':
+                            exp_raw = str(p.get('expiry', ''))
+                            try:
+                                # Prevod YYYYMMDD na "Jun 30"
+                                dt = datetime.strptime(exp_raw, "%Y%m%d")
+                                months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                                exp_fmt = f"{months[dt.month-1]} {dt.day:02d}"
+                                desc = f"{exp_fmt} {p.get('right','')}{p.get('strike','')}"
+                            except:
+                                desc = f"{exp_raw} {p.get('right','')}{p.get('strike','')}"
+                        else:
+                            desc = "AKCIE"
+
                         watcher_rows.append({
                             'sym': sym, 'desc': desc, 'pos': f"{pos:+.0f}",
                             'price': f"{mkt_price:.2f}", 'avg': display_avg,
@@ -163,7 +180,7 @@ def check_position(state, selected_symbols=None):
                             'target_display': target_display, 'is_target': is_target,
                             'is_warning': is_warning, 'is_loss': unr_pl < 0,
                             'is_verified': is_verified, 'secType': st,
-                            'raw_pl_usd': unr_pl, 'raw_pl_pct': pl_pct if st == 'OPT' else 0
+                            'raw_pl_usd': unr_pl, 'raw_pl_pct': pl_pct
                         })
 
                         if st == 'OPT':
@@ -264,7 +281,9 @@ def check_position(state, selected_symbols=None):
                 state.monitor_div_info_text.delete(1.0, tk.END) if hasattr(state, 'monitor_div_info_text') else None,
                 state.monitor_div_info_text.insert(tk.END, div_final_text) if hasattr(state, 'monitor_div_info_text') else None,
                 state.monitor_div_info_text.config(state='disabled') if hasattr(state, 'monitor_div_info_text') else None,
-                update_watcher_tree(state, watcher_rows)
+                update_watcher_tree(state, watcher_rows),
+                state.last_update_time_var.set(f"Aktualizované: {timestamp}"),
+                setattr(state, 'last_monitor_success_time', time.time())
             ])
 
         except Exception as e:
@@ -382,7 +401,14 @@ def create_monitor_tab(parent, state):
     
     # Funkcia na získanie vybraných symbolov
     def get_selected_symbols(s):
-        return [sym for sym, var in s.monitor_selected_symbols.items() if var.get()]
+        selected = [sym for sym, var in s.monitor_selected_symbols.items() if var.get()]
+        # Automaticky pridať symboly z definovaných vlastných párov
+        for pair_data in s.custom_pairs.values():
+            pair_syms = pair_data.get('symbols', []) if isinstance(pair_data, dict) else pair_data
+            for ps in pair_syms:
+                if ps not in selected:
+                    selected.append(ps)
+        return selected
 
     # Funkcia na načítanie všetkých symbolov z portfólia a ich zobrazenie
     def load_portfolio_symbols_and_display_ui(s, ui_frame):
