@@ -4048,6 +4048,10 @@ Skontrolujte:
     
     def save_settings_file(self):
         """Uloží archív nastavení do súboru"""
+        if MODULAR_AVAILABLE and hasattr(self, 'state'):
+            self.state.saved_strategies = self.saved_strategies
+            self.state.save_settings_file()
+            return
         try:
             data = {
                 'last_used': self.strategy_name_var.get(),

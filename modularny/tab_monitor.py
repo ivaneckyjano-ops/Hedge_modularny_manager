@@ -5,6 +5,7 @@ Monitorovanie celého portfólia z TWS.
 """
 import json
 import math
+import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import subprocess
@@ -37,6 +38,7 @@ def check_position(state, selected_symbols=None):
         return
     
     def run():
+        import time # Lokálny import pre istotu v lambde
         watcher_rows = [] # Inicializácia hneď na začiatku vlákna
         try:
             py = sys.executable
@@ -44,7 +46,7 @@ def check_position(state, selected_symbols=None):
             scr = os.path.join(root, 'scripts', 'tws_manual_test.py')
             env = {**os.environ, 'TWS_PORT': state.port_var.get()}
             
-            res = subprocess.run([py, scr, '--mode', 'positions'], capture_output=True, text=True, timeout=60, cwd=root, env=env)
+            res = subprocess.run([py, scr, '--mode', 'positions'], capture_output=True, text=True, timeout=120, cwd=root, env=env)
             
             if res.returncode != 0:
                 error_msg = res.stderr if res.stderr else "Neznáma chyba"
@@ -283,7 +285,7 @@ def check_position(state, selected_symbols=None):
                 state.monitor_div_info_text.config(state='disabled') if hasattr(state, 'monitor_div_info_text') else None,
                 update_watcher_tree(state, watcher_rows),
                 state.last_update_time_var.set(f"Aktualizované: {timestamp}"),
-                setattr(state, 'last_monitor_success_time', time.time())
+                setattr(state, 'last_monitor_success_time', datetime.now().timestamp())
             ])
 
         except Exception as e:
@@ -419,9 +421,9 @@ def create_monitor_tab(parent, state):
                 scr = os.path.join(root, 'scripts', 'tws_manual_test.py')
                 env = {**os.environ, 'TWS_PORT': s.port_var.get()}
                 
-                # Pre zoznam symbolov stačí 60s timeout, ak je portfólio veľké
-                res = subprocess.run([py, scr, '--mode', 'positions'], capture_output=True, text=True, timeout=60, cwd=root, env=env)
-                
+                # Pre zoznam symbolov stačí 120s timeout, ak je portfólio veľké (predtým 60s)
+                res = subprocess.run([py, scr, '--mode', 'positions'], capture_output=True, text=True, timeout=120, cwd=root, env=env)
+
                 if res.returncode != 0:
                     error_msg = res.stderr if res.stderr else "Neznáma chyba"
                     s.root.after(0, lambda: messagebox.showerror("Chyba načítania symbolov", f"Nepodarilo sa načítať symboly: {error_msg}"))

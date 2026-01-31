@@ -782,6 +782,14 @@
       "target_usd": 0.0,
       "opt_target_pct": 5.0,
       "stk_target_usd": 0.75
+    },
+    "CIEN": {
+      "symbols": [
+        "CIEN"
+      ],
+      "target_usd": 0.0,
+      "opt_target_pct": 0.0,
+      "stk_target_usd": 0.0
     }
   },
   "default_gamma_semafor_config": "Stranddle",
@@ -809,5 +817,28 @@
     "QQQ",
     "TDC",
     "VZ"
+  ],
+  "hunter_custom_tickers": [
+    "PLUG",
+    "ULTA",
+    "FCNCA",
+    "BHA",
+    "LLY",
+    "GEV",
+    "SEB",
+    "NEU",
+    "GHC",
+    "TDG",
+    "DJCO",
+    "MSCI",
+    "NVR",
+    "AZO",
+    "ASML",
+    "BLK",
+    "ELV",
+    "EQIX",
+    "ERIE",
+    "FRFHF",
+    "NIO"
   ]
 }

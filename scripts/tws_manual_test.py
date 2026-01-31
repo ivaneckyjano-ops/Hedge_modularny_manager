@@ -112,36 +112,54 @@ def main():
                 if p.contract.secType in ('OPT', 'BAG', 'STK'):
                     unique_symbols.add(p.contract.symbol)
             
-            # Získanie cien podkladu (kvôli Greeks)
+            # Získanie cien podkladu (kvôli Greeks) - OPTIMALIZOVANÉ PARALELNE
+            stk_contracts = []
             for sym in unique_symbols:
                 stk = Stock(sym, 'SMART', 'USD')
-                ib.qualifyContracts(stk)
-                ticker = ib.reqMktData(stk, '', False, False)
-                for _ in range(10):
-                    ib.sleep(0.1)
-                    if ticker.last or ticker.close: break
-                
-                price = ticker.last if ticker.last and not math.isnan(ticker.last) else \
-                        ticker.close if ticker.close and not math.isnan(ticker.close) else 0
-                if price > 0: underlying_prices[sym] = price
-                ib.cancelMktData(stk)
+                stk_contracts.append(stk)
+            
+            ib.qualifyContracts(*stk_contracts)
+            stk_tickers = [ib.reqMktData(stk, '', False, False) for stk in stk_contracts]
+            
+            # Počkáme na ceny všetkých podkladov naraz
+            for _ in range(20):
+                ib.sleep(0.1)
+                if all(t.last or t.close for t in stk_tickers): break
+            
+            for t in stk_tickers:
+                price = t.last if t.last and not math.isnan(t.last) else \
+                        t.close if t.close and not math.isnan(t.close) else 0
+                if price > 0: underlying_prices[t.contract.symbol] = price
+                ib.cancelMktData(t.contract)
 
             active_tickers = {}
+            opt_contracts = []
             for p in portfolio_items:
                 c = p.contract
                 if c.secType in ('OPT', 'BAG'):
                     if not c.exchange: c.exchange = 'SMART'
+                    opt_contracts.append(c)
+            
+            # Hromadná kvalifikácia kontraktov
+            if opt_contracts:
+                ib.qualifyContracts(*opt_contracts)
+                for c in opt_contracts:
                     try:
-                        ib.qualifyContracts(c)
                         active_tickers[c.conId] = ib.reqMktData(c, '106', False, False)
                     except: pass
 
             iv_values = {sym: [] for sym in unique_symbols}
-            for _ in range(25):
+            # Počkáme na Greeks všetkých opcií naraz
+            for _ in range(30):
                 ib.sleep(0.2)
+                all_have_greeks = True
                 for t in active_tickers.values():
                     mg = getattr(t, 'modelGreeks', None) or getattr(t, 'lastGreeks', None)
-                    if mg and mg.impliedVol: iv_values[t.contract.symbol].append(mg.impliedVol)
+                    if mg and mg.impliedVol: 
+                        iv_values[t.contract.symbol].append(mg.impliedVol)
+                    else:
+                        all_have_greeks = False
+                if all_have_greeks and _ > 10: break # Aspoň 2 sekundy, ale ak sú všetky, končíme skôr
             
             for sym, ivs in iv_values.items():
                 avg_ivs[sym] = sum(ivs) / len(ivs) if ivs else 0.30

@@ -304,7 +304,7 @@ def create_gs_monitor_tab(parent, state):
             try:
                 py = sys.executable; root = os.path.dirname(os.path.dirname(__file__))
                 scr = os.path.join(root, 'scripts', 'tws_manual_test.py')
-                res = subprocess.run([py, scr, '--mode', 'positions'], env={**os.environ, 'TWS_PORT': str(state.port_var.get())}, capture_output=True, text=True, timeout=60, cwd=root)
+                res = subprocess.run([py, scr, '--mode', 'positions'], env={**os.environ, 'TWS_PORT': str(state.port_var.get())}, capture_output=True, text=True, timeout=120, cwd=root)
                 if res.returncode == 0:
                     symbols = sorted(list(set(p['symbol'] for p in json.loads(res.stdout).get('positions', []) if p.get('symbol'))))
                     # Pridať možnosť monitorovať všetko naraz
@@ -1020,7 +1020,7 @@ def check_position_gs(state):
         try:
             py = sys.executable; root = os.path.dirname(os.path.dirname(__file__))
             scr = os.path.join(root, 'scripts', 'tws_manual_test.py')
-            res = subprocess.run([py, scr, '--mode', 'positions'], env={**os.environ, 'TWS_PORT': str(port)}, capture_output=True, text=True, timeout=60, cwd=root)
+            res = subprocess.run([py, scr, '--mode', 'positions'], env={**os.environ, 'TWS_PORT': str(port)}, capture_output=True, text=True, timeout=120, cwd=root)
             
             if res.returncode == 0:
                 pos_data_raw = json.loads(res.stdout).get('positions', [])
@@ -1398,7 +1398,7 @@ def check_position_gs(state):
                     state.heartbeat_var.set(new_h)
                     state.last_update_time_var.set(f"Aktualizované: {timestamp}")
                     # Uložiť timestamp pre watchdog
-                    state.last_monitor_success_time = time.time()
+                    state.last_monitor_success_time = datetime.now().timestamp()
                 state.root.after(0, pulse)
                 
             # Naplánovať ďalšiu kontrolu
@@ -1489,7 +1489,7 @@ def check_monitor_watchdog(state):
     """Sleduje, či sa monitor nezasekol (beží každých 5s)"""
     if state.gs_auto_monitor_var.get():
         last_success = getattr(state, 'last_monitor_success_time', 0)
-        now = time.time()
+        now = datetime.now().timestamp()
         
         # Ak od poslednej aktualizácie prešlo viac ako 65 sekúnd (interval je 30s)
         if last_success > 0 and (now - last_success) > 65:

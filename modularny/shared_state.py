@@ -8,6 +8,8 @@ import subprocess
 import threading
 import json
 import os
+import sys
+import time
 from datetime import datetime
 
 
@@ -69,6 +71,7 @@ class SharedState:
         self.monitor_status_var = tk.StringVar(value="Monitor: —") # Nová premenná pre status bar
         self.heartbeat_var = tk.StringVar(value="[ -- ]") # Vizuálny Heartbeat
         self.last_update_time_var = tk.StringVar(value="Posledná aktualizácia: ---")
+        self.tws_watchdog_var = tk.StringVar(value="TWS: --")
         self.vix_value = None
         self._gamma_status_info = {}
         
@@ -189,6 +192,7 @@ class SharedState:
         
         # NOVÉ: Swing Hunter - vybrané symboly na lov signálov
         self.hunter_selected_symbols = {} # Slovník sym -> tk.BooleanVar
+        self.hunter_custom_tickers = [] # NOVÉ: Vlastné tickery pre Swing Hunter
         
         # NOVÉ: Swing Profit Watcher nastavenia
         self.monitor_profit_target_pct = tk.StringVar(value="50.0") # Cieľ pre zatvorenie opcií
@@ -221,6 +225,7 @@ class SharedState:
         
         # Cache pre dividendy
         self.dividend_cache = {} 
+        self._is_loading = False # Poistka proti prepísaniu pri načítavaní
 
         # Načítaj nastavenia
         self.load_settings_file()
@@ -298,6 +303,9 @@ class SharedState:
         
         self.last_update_label = ttk.Label(status_frame, textvariable=self.last_update_time_var, font=('Arial', 8))
         self.last_update_label.pack(side='left', padx=5)
+
+        self.tws_watchdog_label = tk.Label(status_frame, textvariable=self.tws_watchdog_var, font=('Arial', 9, 'bold'))
+        self.tws_watchdog_label.pack(side='left', padx=10)
         
         ttk.Button(status_frame, text="🔄 Test pripojenia", command=self.check_connection).pack(side='left', padx=10)
         
@@ -324,6 +332,7 @@ class SharedState:
 
         # Inicializuj indikátor
         self.update_profile_indicator()
+        self.start_tws_watchdog()
 
     def refresh_all(self):
         """Globálna aktualizácia všetkých modulov naraz"""
@@ -360,6 +369,43 @@ class SharedState:
             print("🚀 GLOBAL REFRESH: Spustená kompletná aktualizácia.")
         except Exception as e:
             print(f"Chyba pri globálnej aktualizácii: {e}")
+
+    def start_tws_watchdog(self):
+        if hasattr(self, '_tws_watchdog_thread') and self._tws_watchdog_thread and self._tws_watchdog_thread.is_alive():
+            return
+        def run():
+            root_dir = os.path.dirname(os.path.dirname(__file__))
+            script = os.path.join(root_dir, 'scripts', 'tws_check_connection.py')
+            was_connected = None
+            alert_shown = False
+            while True:
+                port = self.port_var.get()
+                cmd = [sys.executable, script, str(port)]
+                connected = False
+                error_msg = ""
+                try:
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+                    payload = json.loads(res.stdout.strip()) if res.stdout else {'connected': False}
+                    connected = payload.get('connected', False)
+                    error_msg = payload.get('error', '')
+                except Exception as exc:
+                    error_msg = str(exc)
+                status_text = "TWS: OK" if connected else "TWS: DISCONNECTED"
+                fg = '#2e7d32' if connected else '#c62828'
+                self.root.after(0, lambda text=status_text, color=fg: [self.tws_watchdog_var.set(text), self.tws_watchdog_label.config(fg=color)])
+                if was_connected is None:
+                    was_connected = connected
+                else:
+                    if was_connected and not connected and not alert_shown:
+                        msg = error_msg or "API connection lost"
+                        self.root.after(0, lambda msg=msg: messagebox.showwarning("TWS Watchdog", f"Stratené spojenie s TWS:\n{msg}"))
+                        alert_shown = True
+                    elif not was_connected and connected:
+                        alert_shown = False
+                was_connected = connected
+                time.sleep(25)
+        self._tws_watchdog_thread = threading.Thread(target=run, daemon=True)
+        self._tws_watchdog_thread.start()
 
     def update_profile_indicator(self):
         """Aktualizuje indikátor profilu v status bare"""
@@ -418,21 +464,29 @@ class SharedState:
         """Získa dátum najbližších výsledkov (Earnings) pre daný symbol"""
         try:
             import yfinance as yf
+            import logging
+            logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+            
+            # ETFs nemajú earnings a yfinance pre ne hádže 404 chyby do konzoly
             ticker = yf.Ticker(symbol)
-            calendar = ticker.calendar
-            if calendar:
-                e_dates = None
-                if isinstance(calendar, dict):
-                    e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
-                elif hasattr(calendar, 'empty') and not calendar.empty:
-                    # calendar['Earnings Date'] vracia zoznam dátumov (začiatok a koniec okna)
-                    # Zoberieme ten prvý
-                    e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
-                
-                if e_dates is not None and isinstance(e_dates, list) and len(e_dates) > 0:
-                    return e_dates[0]
-                elif e_dates is not None:
-                    return e_dates
+            
+            # Rýchla kontrola či ide o ETF (ak chýba 'earnings' v info)
+            # Alebo jednoducho skúsime calendar a ak zlyhá, sme ticho
+            try:
+                calendar = ticker.calendar
+                if calendar is not None:
+                    e_dates = None
+                    if isinstance(calendar, dict):
+                        e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
+                    elif hasattr(calendar, 'empty') and not calendar.empty:
+                        e_dates = calendar.get('Earnings Date') or calendar.get('Earnings High')
+                    
+                    if e_dates is not None and isinstance(e_dates, list) and len(e_dates) > 0:
+                        return e_dates[0]
+                    elif e_dates is not None:
+                        return e_dates
+            except:
+                pass # Tiché zlyhanie pre ETFs
             return None
         except:
             return None
@@ -448,52 +502,59 @@ class SharedState:
         try:
             import yfinance as yf
             import pandas as pd
+            import logging
+            logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+            
             ticker = yf.Ticker(symbol)
             
             # 1. Skúsime získať ex-date z kalendára
             ex_date = None
-            cal = ticker.calendar
-            
-            if cal:
-                if isinstance(cal, dict):
-                    # Formát dictionary (novšie yfinance)
-                    ex_date = cal.get('Ex-Dividend Date') or cal.get('Dividend Date')
-                elif hasattr(cal, 'empty') and not cal.empty:
-                    # Formát DataFrame (staršie yfinance)
-                    if 'Ex-Dividend Date' in cal.index:
-                        ex_date = cal.loc['Ex-Dividend Date'].iloc[0]
-                    elif 'Dividend Date' in cal.index:
-                        ex_date = cal.loc['Dividend Date'].iloc[0]
+            try:
+                cal = ticker.calendar
+                if cal is not None:
+                    if isinstance(cal, dict):
+                        ex_date = cal.get('Ex-Dividend Date') or cal.get('Dividend Date')
+                    elif hasattr(cal, 'empty') and not cal.empty:
+                        if 'Ex-Dividend Date' in cal.index:
+                            ex_date = cal.loc['Ex-Dividend Date'].iloc[0]
+                        elif 'Dividend Date' in cal.index:
+                            ex_date = cal.loc['Dividend Date'].iloc[0]
+            except:
+                pass
 
             # 2. Skúsime získať výšku dividendy (per payment)
             div_rate = 0
-            divs = ticker.dividends
-            if divs is not None and len(divs) > 0:
-                div_rate = float(divs.iloc[-1])
-            else:
-                # Ak nie je história, skúsime info
-                info = ticker.info
-                annual_rate = info.get('dividendRate') or info.get('trailingAnnualDividendRate', 0)
-                div_rate = annual_rate / 4.0 if annual_rate > 0 else 0
+            try:
+                divs = ticker.dividends
+                if divs is not None and len(divs) > 0:
+                    div_rate = float(divs.iloc[-1])
+                else:
+                    # Ak nie je história, skúsime info (iba ak je to akcia)
+                    info = ticker.info
+                    annual_rate = info.get('dividendRate') or info.get('trailingAnnualDividendRate', 0)
+                    div_rate = annual_rate / 4.0 if (annual_rate and annual_rate > 0) else 0
+            except:
+                pass
 
             # 3. Ak stále nemáme ex-date, skúsime info
             if not ex_date:
-                info = ticker.info
-                ex_date_raw = info.get('exDividendDate')
-                if ex_date_raw:
-                    from datetime import date
-                    if isinstance(ex_date_raw, int):
-                        ex_date = date.fromtimestamp(ex_date_raw)
-                    else:
-                        try:
+                try:
+                    info = ticker.info
+                    ex_date_raw = info.get('exDividendDate')
+                    if ex_date_raw:
+                        from datetime import date
+                        if isinstance(ex_date_raw, int):
+                            ex_date = date.fromtimestamp(ex_date_raw)
+                        else:
                             ex_date = datetime.strptime(str(ex_date_raw), '%Y-%m-%d').date()
-                        except: pass
+                except:
+                    pass
 
             result = {'rate': div_rate, 'ex_date': ex_date}
             self.dividend_cache[symbol] = (result, datetime.now())
             return result
         except Exception as e:
-            print(f"DEBUG: Dividend fetch failed for {symbol}: {e}")
+            # DEBUG: Dividend fetch failed for {symbol}: {e}
             return {'rate': 0, 'ex_date': None}
     
     def check_connection(self):
@@ -710,6 +771,7 @@ class SharedState:
 
     def load_settings_file(self):
         """Načíta archív nastavení zo súboru"""
+        self._is_loading = True
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
@@ -761,7 +823,9 @@ class SharedState:
                     self.monitor_selected_symbols = {}
                     for sym in loaded_selected_symbols:
                         self.monitor_selected_symbols[sym] = tk.BooleanVar(value=True)
-
+                    
+                    # Načítaj vlastné tickery pre Hunter
+                    self.hunter_custom_tickers = data.get('hunter_custom_tickers', [])
             else:
                 self.saved_strategies = {}
                 # Nastav default hodnoty aj pre Semafor a model priority ak súbor neexistuje
@@ -770,6 +834,7 @@ class SharedState:
                 self.gs_neutral_threshold_var.set(str(self.gamma_semafor_thresholds["neutral"]))
                 self.gs_stop_threshold_var.set(str(self.gamma_semafor_thresholds["stop"]))
                 self.gs_model_priority_var.set(False)
+                self.hunter_custom_tickers = []
 
         except Exception as e:
             print(f"Chyba pri načítavaní nastavení: {e}")
@@ -780,9 +845,14 @@ class SharedState:
             self.gs_neutral_threshold_var.set(str(self.gamma_semafor_thresholds["neutral"]))
             self.gs_stop_threshold_var.set(str(self.gamma_semafor_thresholds["stop"]))
             self.gs_model_priority_var.set(False)
+            self.hunter_custom_tickers = []
+        finally:
+            self._is_loading = False
 
     def save_settings_file(self):
         """Uloží archív nastavení do súboru"""
+        if getattr(self, '_is_loading', False):
+            return
         try:
             data = {
                 'strategies': self.saved_strategies,
@@ -799,7 +869,8 @@ class SharedState:
                 'monitor_auto_restart_var': self.monitor_auto_restart_var.get(),
                 'monitor_trailing_opt_pct': self.monitor_trailing_opt_pct.get(),
                 'monitor_trailing_stk_usd': self.monitor_trailing_stk_usd.get(),
-                'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()]
+                'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()],
+                'hunter_custom_tickers': getattr(self, 'hunter_custom_tickers', [])
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)

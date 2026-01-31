@@ -3,7 +3,9 @@ import argparse
 import sys
 import json
 import os
+import random
 from pathlib import Path
+from datetime import datetime
 
 # Pridanie cesty k venv
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -19,16 +21,17 @@ def main():
     parser.add_argument('--duration', default='2 D', help='Duration (e.g. 2 D, 1 W)')
     parser.add_argument('--barSize', default='1 hour', help='Bar size (e.g. 15 mins, 1 hour)')
     parser.add_argument('--port', type=int, default=7497)
-    parser.add_argument('--force', action='store_true', help='Bypass cache and fetch fresh data')
+    parser.add_argument('--force', action='store_true', help='Bypass cache')
     
     args = parser.parse_args()
+    client_id = random.randint(100, 900)
 
-    # --- LOGIKA CACHE ---
+    # --- CACHE LOGIKA ---
     cache_dir = BASE_DIR / 'cache' / 'history'
+    cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / f"{args.symbol}_{args.barSize.replace(' ', '_')}.json"
     
-    # Definujeme životnosť cache podľa timeframe (v sekundách)
-    ttl = 900 # Default 15 min
+    ttl = 900 
     if "15 mins" in args.barSize: ttl = 300
     elif "1 hour" in args.barSize: ttl = 900
     elif "4 hours" in args.barSize: ttl = 1800
@@ -36,31 +39,37 @@ def main():
 
     if not args.force and cache_file.exists():
         import time
-        mtime = os.path.getmtime(cache_file)
-        if (time.time() - mtime) < ttl:
-            try:
+        try:
+            mtime = os.path.getmtime(cache_file)
+            if (time.time() - mtime) < ttl:
                 with open(cache_file, 'r') as f:
-                    cached_data = json.load(f)
-                    # Pridáme info, že ide o cache
-                    cached_data['from_cache'] = True
-                    print(json.dumps(cached_data))
+                    data = json.load(f)
+                    data['from_cache'] = True
+                    print(json.dumps(data))
                     return
-            except: pass
+        except: pass
 
     ib = IB()
     try:
-        ib.connect('127.0.0.1', args.port, clientId=155, timeout=15)
+        # Skúsime sa pripojiť
+        ib.connect('127.0.0.1', args.port, clientId=client_id, timeout=15)
         
+        # Špecifikácia kontraktu (pre ETFs skúsime SMART, ale aj konkrétne burzy ak treba)
         contract = Stock(args.symbol, 'SMART', 'USD')
-        ib.qualifyContracts(contract)
+        qualified = ib.qualifyContracts(contract)
         
+        if not qualified:
+            print(json.dumps({'success': False, 'error': f'Symbol {args.symbol} nebol v TWS nájdený.'}))
+            return
+
+        # Sťahujeme dáta
         bars = ib.reqHistoricalData(
             contract, endDateTime='', durationStr=args.duration,
             barSizeSetting=args.barSize, whatToShow='TRADES', useRTH=True
         )
         
         if not bars:
-            print(json.dumps({'success': False, 'error': 'No data returned'}))
+            print(json.dumps({'success': False, 'error': 'TWS nevrátil žiadne historické sviečky.'}))
             return
 
         data_list = []
@@ -70,13 +79,15 @@ def main():
                 'open': b.open, 'high': b.high, 'low': b.low, 'close': b.close, 'volume': b.volume
             })
             
-        result = {'success': True, 'candles': data_list, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        result = {
+            'success': True, 
+            'symbol': args.symbol,
+            'candles': data_list, 
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
         
-        # Uložiť do cache
-        try:
-            with open(cache_file, 'w') as f:
-                json.dump(result, f, indent=2)
-        except: pass
+        with open(cache_file, 'w') as f:
+            json.dump(result, f, indent=2)
 
         print(json.dumps(result))
         
