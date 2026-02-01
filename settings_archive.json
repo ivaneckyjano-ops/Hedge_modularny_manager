@@ -819,7 +819,6 @@
     "VZ"
   ],
   "hunter_custom_tickers": [
-    "PLUG",
     "ULTA",
     "FCNCA",
     "BHA",
@@ -829,16 +828,13 @@
     "NEU",
     "GHC",
     "TDG",
-    "DJCO",
     "MSCI",
     "NVR",
     "AZO",
     "ASML",
     "BLK",
-    "ELV",
     "EQIX",
     "ERIE",
-    "FRFHF",
     "NIO"
   ]
 }
