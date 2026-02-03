@@ -193,6 +193,7 @@ class SharedState:
         # NOVÉ: Swing Hunter - vybrané symboly na lov signálov
         self.hunter_selected_symbols = {} # Slovník sym -> tk.BooleanVar
         self.hunter_custom_tickers = [] # NOVÉ: Vlastné tickery pre Swing Hunter
+        self.hunter_pinned_symbols = []
         
         # NOVÉ: Swing Profit Watcher nastavenia
         self.monitor_profit_target_pct = tk.StringVar(value="50.0") # Cieľ pre zatvorenie opcií
@@ -826,6 +827,7 @@ class SharedState:
                     
                     # Načítaj vlastné tickery pre Hunter
                     self.hunter_custom_tickers = data.get('hunter_custom_tickers', [])
+                    self.hunter_pinned_symbols = data.get('hunter_pinned_symbols', [])
             else:
                 self.saved_strategies = {}
                 # Nastav default hodnoty aj pre Semafor a model priority ak súbor neexistuje
@@ -835,6 +837,7 @@ class SharedState:
                 self.gs_stop_threshold_var.set(str(self.gamma_semafor_thresholds["stop"]))
                 self.gs_model_priority_var.set(False)
                 self.hunter_custom_tickers = []
+                self.hunter_pinned_symbols = []
 
         except Exception as e:
             print(f"Chyba pri načítavaní nastavení: {e}")
@@ -846,6 +849,7 @@ class SharedState:
             self.gs_stop_threshold_var.set(str(self.gamma_semafor_thresholds["stop"]))
             self.gs_model_priority_var.set(False)
             self.hunter_custom_tickers = []
+            self.hunter_pinned_symbols = []
         finally:
             self._is_loading = False
 
@@ -870,7 +874,8 @@ class SharedState:
                 'monitor_trailing_opt_pct': self.monitor_trailing_opt_pct.get(),
                 'monitor_trailing_stk_usd': self.monitor_trailing_stk_usd.get(),
                 'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()],
-                'hunter_custom_tickers': getattr(self, 'hunter_custom_tickers', [])
+                'hunter_custom_tickers': getattr(self, 'hunter_custom_tickers', []),
+                'hunter_pinned_symbols': getattr(self, 'hunter_pinned_symbols', [])
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)

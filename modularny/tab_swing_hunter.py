@@ -27,9 +27,13 @@ SCORE_FILTER_MAP = {
 
 LOG_FIELDNAMES = [
     'EntryTime', 'Symbol', 'Timeframe', 'EntryPrice',
-    'RSI', 'PercentB', 'SignalType', 'ExitPrice', 'FinalPL'
+    'RSI', 'PercentB', 'SignalType', 'ExitPrice', 'FinalPL',
+    'Zone', 'Trend', 'ScorePct', 'MACD_Cross', 'RVI_gt_Sig', 'PivotDist', 'Action'
 ]
 LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'swing_hunter_log.csv')
+TRADE_PLAN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'swing_trade_plans.csv')
+MODEL_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'swing_model.json')
+TRAIN_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'swing_train_logreg.py')
 
 def _ensure_log_file():
     if os.path.exists(LOG_FILE):
@@ -42,7 +46,22 @@ def _ensure_log_file():
         pass
 
 
-def log_signal_entry(symbol, timeframe, entry_price, rsi, pct_b, signal_type):
+def _ensure_trade_plan_file():
+    if os.path.exists(TRADE_PLAN_FILE):
+        return
+    try:
+        with open(TRADE_PLAN_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'Timestamp', 'Symbol', 'Entry', 'SL', 'TP1', 'TP2', 'R_R',
+                'Action', 'Strategy', 'Reason', 'OptionStrategy', 'OptionReason'
+            ])
+    except Exception:
+        pass
+
+
+def log_signal_entry(symbol, timeframe, entry_price, rsi, pct_b, signal_type,
+                    zone="", trend="", score_pct=None, macd_cross=False, rvi_gt_sig=False, pivot_dist=None, action_text=""):
     _ensure_log_file()
     entry = {
         'EntryTime': datetime.now().isoformat(),
@@ -53,7 +72,14 @@ def log_signal_entry(symbol, timeframe, entry_price, rsi, pct_b, signal_type):
         'PercentB': f"{pct_b:.1f}" if pct_b is not None else '',
         'SignalType': signal_type,
         'ExitPrice': '',
-        'FinalPL': ''
+        'FinalPL': '',
+        'Zone': zone,
+        'Trend': trend,
+        'ScorePct': f"{score_pct:.0f}" if score_pct is not None else '',
+        'MACD_Cross': 1 if macd_cross else 0,
+        'RVI_gt_Sig': 1 if rvi_gt_sig else 0,
+        'PivotDist': f"{pivot_dist:+.2f}" if pivot_dist is not None else '',
+        'Action': action_text
     }
     try:
         with open(LOG_FILE, 'a', newline='', encoding='utf-8') as f:
@@ -106,6 +132,226 @@ def get_dynamic_interval(score_pct, zone, pct_b):
 def format_mmss(seconds):
     m, s = divmod(int(seconds), 60)
     return f"{m:02d}:{s:02d}"
+
+
+def recommend_strategy(summary):
+    """Vrátane odporúčanej stratégie + dôvodu pre výťah/Trade plan"""
+    zone = summary.get('zone', 'neutral')
+    action = (summary.get('action') or '').upper()
+    pct_b = summary.get('pct_b')
+    rvi = summary.get('rvi')
+    rvi_s = summary.get('rvi_s')
+    macd = summary.get('macd')
+    score_pct = summary.get('score_pct') or 0.0
+    trend_label = summary.get('trend_label', '')
+    trend_breakout = summary.get('trend_breakout', False)
+
+    reason_parts = []
+    if zone:
+        reason_parts.append(zone.capitalize())
+    if trend_label and trend_label != "—":
+        reason_parts.append(trend_label)
+    if pct_b is not None:
+        reason_parts.append(f"%B {pct_b:.0f}%")
+
+    is_risk = zone == 'risk' or "RIZIKO" in action or "VÝSTUP" in action or (pct_b is not None and pct_b > 80)
+    if is_risk:
+        reason = "Vysoké %B" if pct_b is not None and pct_b > 80 else "Riziková zóna"
+        return "Risk/Exit", reason
+
+    if pct_b is not None and pct_b < 30:
+        extras = []
+        if rvi is not None and rvi_s is not None and rvi > rvi_s:
+            extras.append("RVI>Sig")
+        if macd and macd.get('is_cross'):
+            extras.append("MACD cross")
+        reason = "Low %B"
+        if extras:
+            reason = f"{reason} ({', '.join(extras)})"
+        return "Mean Reversion (Hunt)", reason
+
+    if trend_breakout or (trend_label == 'Býk' and score_pct >= 70):
+        reason = "MA200 breakout" if trend_breakout else "Bull trend"
+        return "Trend Breakout", reason
+
+    if score_pct >= 60:
+        label = "Watchlist (high score)"
+    else:
+        label = "Watch & Wait"
+    reason = " • ".join(reason_parts) if reason_parts else "Čakaj na potvrdenie"
+    return label, reason
+
+
+def recommend_option_strategy(summary):
+    """Jednoduchý návrh opčnej stratégie podľa zóny/trendu"""
+    zone = summary.get('zone', 'neutral')
+    trend_label = summary.get('trend_label', '')
+    trend_breakout = summary.get('trend_breakout', False)
+    pct_b = summary.get('pct_b')
+    action = (summary.get('action') or '').upper()
+
+    if zone == 'risk' or "RIZIKO" in action or "VÝSTUP" in action:
+        return "Zatvoriť/hedge", "Vyšší %B/exit – covered call alebo collar"
+
+    if trend_breakout or trend_label == 'Býk':
+        return "Call debit spread", "Trend BULL / breakout"
+
+    if pct_b is not None and pct_b < 30:
+        return "Bull put spread", "Mean reversion zóna (%B<30)"
+
+    if trend_label == 'Bear':
+        return "Bear call spread", "BEAR trend – hrať rezistenciu"
+
+    return "Neutral calendar", "Neutrálna zóna – časové rozpady"
+
+
+def predict_ml_score(summary, model):
+    """Spočíta pravdepodobnosť úspechu pomocou uloženého modelu (logreg)."""
+    if not model:
+        return None
+    vocab = model.get('vocab', {})
+    weights = model.get('weights', [])
+    if not vocab or not weights:
+        return None
+
+    def bucket_pctb(val):
+        if val is None:
+            return "pctb:n/a"
+        if val < 30:
+            return "pctb:<30"
+        if val < 80:
+            return "pctb:30-80"
+        if val < 100:
+            return "pctb:80-100"
+        return "pctb:>100"
+
+    def bucket_rsi(val):
+        if val is None:
+            return "rsi:n/a"
+        if val < 30:
+            return "rsi:<30"
+        if val < 50:
+            return "rsi:30-50"
+        if val < 70:
+            return "rsi:50-70"
+        return "rsi:>=70"
+
+    sig = (summary.get('action') or '').lower()
+    if "strong buy" in sig:
+        sig_b = "sig:strong_buy"
+    elif "buy" in sig:
+        sig_b = "sig:buy"
+    elif "risk" in sig or "riziko" in sig:
+        sig_b = "sig:risk"
+    elif "take profit" in sig or "exit" in sig:
+        sig_b = "sig:exit"
+    else:
+        sig_b = "sig:other"
+
+    pctb_b = bucket_pctb(summary.get('pct_b'))
+    rsi_b = bucket_rsi(summary.get('rsi'))
+    tf = summary.get('timeframe', 'n/a')
+    tf_b = f"tf:{tf}"
+
+    feats = [pctb_b, rsi_b, sig_b, tf_b]
+    vec = 0.0
+    for f in feats:
+        idx = vocab.get(f)
+        if idx is not None and idx < len(weights):
+            vec += weights[idx] * 1.0
+
+    try:
+        import math
+        return 1 / (1 + math.exp(-vec))
+    except Exception:
+        return None
+
+def save_trade_plan_to_file(symbol, plan_vars):
+    _ensure_trade_plan_file()
+    ts = datetime.now().isoformat()
+    row = [
+        ts,
+        symbol,
+        plan_vars['entry'].get(),
+        plan_vars['sl'].get(),
+        plan_vars['tp1'].get(),
+        plan_vars['tp2'].get(),
+        plan_vars['rr'].get(),
+        plan_vars['action'].get(),
+        plan_vars['strategy'].get(),
+        plan_vars['reason'].get(),
+        plan_vars.get('option_strategy', tk.StringVar(value="—")).get(),
+        plan_vars.get('option_reason', tk.StringVar(value="—")).get()
+    ]
+    try:
+        with open(TRADE_PLAN_FILE, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(row)
+    except Exception as e:
+        messagebox.showerror("Trade plan", f"Nepodarilo sa uložiť plán:\n{e}")
+
+
+def _load_model_file():
+    if not os.path.exists(MODEL_FILE):
+        return None
+    try:
+        with open(MODEL_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Nepodarilo sa načítať model {MODEL_FILE}: {e}")
+        return None
+
+
+def _train_model_async(state, notify=False, label=None):
+    """Spustí tréning modelu v samostatnom vlákne a po úspechu načíta model."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    py = os.path.join(root, 'venv', 'bin', 'python3')
+    if not os.path.exists(py):
+        py = sys.executable
+
+    def run():
+        try:
+            cmd = [py, TRAIN_SCRIPT]
+            res = subprocess.run(cmd, capture_output=True, text=True, cwd=root, timeout=60)
+            if res.returncode == 0:
+                state.hunter_model = _load_model_file()
+                msg = res.stdout.strip() or "ML model bol pretrénovaný."
+                if notify:
+                    messagebox.showinfo("ML model", msg)
+                else:
+                    print(msg)
+                if label:
+                    state.root.after(0, lambda: label.config(text="ML model: OK", foreground="green"))
+            else:
+                err = res.stderr.strip() or res.stdout.strip()
+                if notify:
+                    messagebox.showerror("ML model", f"Tréning zlyhal:\n{err}")
+                else:
+                    print(f"ML tréning zlyhal: {err}")
+        except Exception as e:
+            if notify:
+                messagebox.showerror("ML model", f"Tréning zlyhal:\n{e}")
+            else:
+                print(f"ML tréning zlyhal: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _auto_train_model_if_needed(state):
+    """Ak model chýba alebo je starší ako 1 deň a máme log, spustí tréning."""
+    if not os.path.exists(LOG_FILE):
+        return
+    model_missing = not os.path.exists(MODEL_FILE)
+    stale = False
+    if not model_missing:
+        try:
+            age = time.time() - os.path.getmtime(MODEL_FILE)
+            stale = age > 86400  # 1 deň
+        except Exception:
+            stale = True
+    if model_missing or stale:
+        # Pri auto-tréningu nechceme popupy, aby neblokovali štart
+        _train_model_async(state, notify=False, label=getattr(state, 'hunter_status_label', None))
 
 
 def update_next_update_labels(state):
@@ -191,6 +437,48 @@ def calculate_macd(candles, fast=12, slow=26, signal=9):
         'is_cross': is_bullish_cross
     }
 
+
+def _detect_ma200_cross(df, lookback=3):
+    """Zistí, či cena prekrížila MA200 smerom nahor v posledných lookback sviečkach"""
+    if df is None or df.empty or len(df) < 2:
+        return False
+    recent = df.tail(lookback + 1)
+    if len(recent) < 2:
+        return False
+    curr = recent.iloc[-1]
+    if curr['close'] <= curr['sma200']:
+        return False
+    prev_candidates = recent.iloc[:-1].iloc[::-1][:lookback]
+    for prev in prev_candidates.itertuples():
+        if prev.close <= prev.sma200:
+            return True
+    return False
+
+
+def calculate_ma200_metrics(candles, length=200):
+    """Vypočíta SMA200 a pomocné metriky (smer, cross)"""
+    if len(candles) < length:
+        return None
+    df = pd.DataFrame(candles)
+    sma_series = ta.sma(df['close'], length=length)
+    if sma_series is None:
+        return None
+    df['sma200'] = sma_series
+    valid = df.dropna(subset=['sma200'])
+    if valid.empty:
+        return None
+    last = valid.iloc[-1]
+    slope_down = False
+    if len(valid) >= 6:
+        slope_down = last['sma200'] < valid.iloc[-6]['sma200']
+    cross_up = _detect_ma200_cross(valid, lookback=3)
+    return {
+        'value': last['sma200'],
+        'slope_down': slope_down,
+        'cross_up': cross_up,
+        'frame': valid
+    }
+
 def vypocitaj_swing_skore(rsi, price, bb, rvi, rvi_s, macd_data, p_dist, best_level):
     """Vypočíta celkové Swing Skóre (0-10), rozklad po indikátoroch a aktuálnu zónu"""
     score = 0
@@ -217,7 +505,7 @@ def vypocitaj_swing_skore(rsi, price, bb, rvi, rvi_s, macd_data, p_dist, best_le
 
     if abs(p_dist) < 0.5 and best_level in ('S1', 'S2'):
         score += 2
-        breakdown['Pivot'] = breakdown.get('Pivot', 0) + 2
+        breakdown['Piv'] = breakdown.get('Piv', 0) + 2
 
     zone = determine_swing_zone(rsi, pct_b)
     if zone == 'hold':
@@ -381,6 +669,9 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             state.hunter_status_label.config(text="✓ Vyčistené", foreground="gray")
         return 
 
+    if not hasattr(state, 'hunter_symbol_summaries'):
+        state.hunter_symbol_summaries = {}
+
     if hasattr(state, 'hunter_status_label'):
         state.hunter_status_label.config(text="🔍 ANALYZUJEM...", foreground="blue")
 
@@ -394,6 +685,8 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
         selected_tfs = [tf for tf, var in state.hunter_tf_vars.items() if var.get()]
     if tf_var.get() not in selected_tfs:
         selected_tfs.insert(0, tf_var.get())
+    if "1 day" not in selected_tfs:
+        selected_tfs.append("1 day")  # always fetch daily for MA200/pivots
     if not selected_tfs:
         selected_tfs = [tf_var.get()]
 
@@ -430,9 +723,16 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             # --- 1. ZÍSKANIE PIVOT DATA (Predchádzajúci deň/týždeň) ---
             pivots = None
             try:
-                # Ak sme na dennom grafe, chceme týždenné pivoty, inak denné
-                pivot_tf = "1 day" if tf_var.get() != "1 day" else "1 week"
-                pivot_dur = "10 D" if pivot_tf == "1 day" else "1 M"
+                current_tf = tf_var.get()
+                if "week" in current_tf:
+                    pivot_tf = "1 week"
+                    pivot_dur = "3 M"
+                elif current_tf == "1 day":
+                    pivot_tf = "1 week"
+                    pivot_dur = "1 M"
+                else:
+                    pivot_tf = "1 day"
+                    pivot_dur = "10 D"
                 
                 cmd_p = [py, scr, '--symbol', sym, '--barSize', pivot_tf, '--duration', pivot_dur, '--port', port]
                 res_p = subprocess.run(cmd_p, capture_output=True, text=True, timeout=50, cwd=root)
@@ -449,10 +749,18 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             
             for tf in tfs:
                 dur = "10 D"
-                if "1 hour" in tf: dur = "25 D"
-                elif "4 hours" in tf: dur = "60 D"
-                elif "day" in tf: dur = "1 Y"
-                elif "15 mins" in tf: dur = "5 D"
+                if "15 mins" in tf:
+                    dur = "5 D"
+                elif "1 hour" in tf:
+                    dur = "25 D"
+                elif "4 hours" in tf:
+                    dur = "60 D"
+                elif tf == "1 day":
+                    dur = "260 D"
+                elif "week" in tf:
+                    dur = "2 Y"
+                elif "day" in tf:
+                    dur = "1 Y"
 
                 try:
                     cmd = [py, scr, '--symbol', sym, '--barSize', tf, '--duration', dur, '--port', port]
@@ -516,11 +824,32 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             
             main_data = results_tf[main_tf]
             price = main_data['price']
+
+            daily_info = results_tf.get('1 day')
+            ma200_info = None
+            if daily_info and daily_info.get('candles'):
+                ma200_info = calculate_ma200_metrics(daily_info['candles'])
+
+            ma200_value = ma200_info.get('value') if ma200_info else None
+            has_ma = ma200_value is not None and ma200_value > 0
+            price_above_ma = price >= ma200_value if has_ma else True
+            is_bearish_trend = has_ma and price < ma200_value
+            trend_text = "—"
+            trend_tag = None
+            trend_label = "—"
+            if has_ma:
+                dist_pct = ((price - ma200_value) / ma200_value) * 100
+                trend_label = 'Býk' if price_above_ma else 'Bear'
+                trend_text = f"{trend_label} {dist_pct:+.1f}%"
+                if is_bearish_trend:
+                    trend_tag = 'trend_bear'
+                else:
+                    trend_tag = 'trend_breakout' if ma200_info.get('cross_up') and price_above_ma else 'trend_bull'
             
             # Logika Súladu a finálneho signálu pre Rodiča
             status, action, tag = "Neutral", "Čakať", ""
             
-            rsi_vals = {tf: results_tf.get(tf, {}).get('rsi', 50.0) for tf in ["15 mins", "1 hour", "4 hours", "1 day"]}
+            rsi_vals = {tf: results_tf.get(tf, {}).get('rsi', 50.0) for tf in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]}
             
             align_buy_short = rsi_vals['15 mins'] < 35 and rsi_vals['1 hour'] < 35
             align_buy_long  = rsi_vals['4 hours'] < 40 and rsi_vals['1 day'] < 45
@@ -556,7 +885,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                         min_dist_pct = dist_pct
                         best_level = name
                 
-                p_dist_str = f"{best_level} ({min_dist_pct:+.2f}%)"
+                p_dist_str = f"{best_level[0]} ({min_dist_pct:+.2f}%)" if best_level else "—"
                 if abs(min_dist_pct) < 0.5: # Ak sme bližšie než 0.5% k hladine
                     is_near_support = best_level in ('S1', 'S2', 'P')
 
@@ -583,7 +912,14 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 main_data['rvi'], main_data['rvi_s'], 
                 main_macd, score_dist, score_level
             )
-            score_pct = score_to_percent(swing_score)
+            adjusted_score = swing_score
+            if has_ma:
+                if is_bearish_trend:
+                    adjusted_score *= 0.6
+                elif ma200_info.get('slope_down'):
+                    adjusted_score *= 0.9
+            adjusted_score = max(0.0, min(10.0, adjusted_score))
+            score_pct = score_to_percent(adjusted_score)
             active_key = (sym, main_tf)
             active_signal = state.hunter_active_signals.get(active_key, None)
             pl_signal_value = ""
@@ -624,7 +960,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             else:
                 pctb_tag = 'pctb_mid'
             pivot_label = p_dist_str if p_dist_str else "—"
-            pivot_bb_text = f"Pivot: {pivot_label} / %B: {pct_b_text}"
+            pivot_bb_text = pivot_label
             interval = get_dynamic_interval(score_pct, zone, pct_b_value)
             next_update_time = time.time() + interval
             state.hunter_next_update[sym] = next_update_time
@@ -635,8 +971,16 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             rvi_bear = main_data['rvi'] < main_data['rvi_s']
             macd_falling = bool(main_macd and main_macd.get('macd') < main_macd.get('signal', 0))
 
+            def bearish_label():
+                return "Bearish Rebound" if score_pct >= 40 else "Sledovať rezistenciu"
+
+            trend_breakout = has_ma and ma200_info and ma200_info.get('cross_up') and price_above_ma
             action = "Neutral"
-            if zone == 'hunt':
+            if trend_breakout:
+                action = "Trend Breakout"
+            elif is_bearish_trend:
+                action = bearish_label()
+            elif zone == 'hunt':
                 action = "🚀 STRONG BUY" if strong_macd or rvi_bull else "⏳ SLEDOVAŤ AKUMULÁCIU"
             elif zone == 'hold':
                 action = "⏳ DRŽAŤ / NEUTRÁL"
@@ -652,13 +996,20 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 else:
                     action = "Neutral"
 
-            entry_actions = {"🚀 STRONG BUY", "✅ VHODNÝ VSTUP"}
+            entry_actions = {"🚀 STRONG BUY", "✅ VHODNÝ VSTUP", "Trend Breakout"}
             if action in entry_actions:
                 if not active_signal:
                     entry_time = log_signal_entry(
                         sym, main_tf, price,
                         main_data['rsi'], pct_b_value,
-                        action
+                        action,
+                        zone=zone,
+                        trend=trend_label,
+                        score_pct=score_pct,
+                        macd_cross=bool(main_macd and main_macd.get('is_cross')),
+                        rvi_gt_sig=rvi_bull,
+                        pivot_dist=score_dist,
+                        action_text=action
                     )
                     state.hunter_active_signals[active_key] = {
                         'entry_price': price,
@@ -695,7 +1046,13 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                           pct_b_cell=pct_b_text, pivot_bb=pivot_bb_text, sc_text=score_text,
                           bk_text=breakdown_text, z_tag=zone_tag, pct_tag=pctb_tag,
                           zone_name=zone, pl_disc=pl_signal_value, pl_t=pl_tag,
-                          next_up=next_update_text):
+                          next_up=next_update_text, trend_val=trend_text,
+                          trend_label_val=trend_label, main_data_param=main_data,
+                          score_pct_val=score_pct, pivots_param=pivots,
+                          main_bb_param=main_bb, macd_param=main_macd,
+                          score_level_val=score_level, score_dist_val=score_dist,
+                          has_ma_param=has_ma, ma200_value_param=ma200_value,
+                          pct_b_value_param=pct_b_value, trend_breakout_flag=trend_breakout):
                 # Nájsť rodičovský riadok
                 parent_id = None
                 for item in tree.get_children():
@@ -704,18 +1061,22 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                         break
                 
                 # Zobrazenie skóre v stĺpci RSI rodiča (upravíme Treeview neskôr)
+                ml_prob = summary.get('ml_prob') if 'summary' in locals() else None
+                ml_text = f"{ml_prob*100:.0f}%" if isinstance(ml_prob, (int, float)) else "—"
                 vals = (
                     f"{p:.2f}",
+                    trend_val,
                     sc_text,
                     pct_b_cell,
                     next_up,
-                    f"{main_data['rvi']:.4f}",
-                    f"{main_data['rvi_s']:.4f}",
+                    f"{main_data_param['rvi']:.4f}",
+                    f"{main_data_param['rvi_s']:.4f}",
                     pivot_bb,
                     st,
                     ac,
-                    pl_disc,
-                    bk_text
+                    ml_text,
+                    bk_text,
+                    pl_disc
                 )
                 
                 parent_tags = [score_tag]
@@ -725,6 +1086,10 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                     parent_tags.append(z_tag)
                 if pl_t:
                     parent_tags.append(pl_t)
+                if trend_tag:
+                    parent_tags.append(trend_tag)
+                if s in getattr(state, 'hunter_pinned_symbols', []):
+                    parent_tags.append('pinned')
                 parent_tags.append('header')
                 state.hunter_base_tags[s] = list(parent_tags)
                 if tg:
@@ -739,12 +1104,14 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 for child in tree.get_children(parent_id):
                     tree.delete(child)
                 
-                for tf_name in ["15 mins", "1 hour", "4 hours", "1 day"]:
+                for tf_name in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]:
                     if tf_name in res_tf:
                         d = res_tf[tf_name]
-                        ico = "🔥 " if d['rsi'] < 30 else ("❄️ " if d['rsi'] > 70 else "")
+                        if tf_name in ('1 day', '1 week'):
+                            tf_checkbox = state.hunter_tf_vars.get(tf_name) if hasattr(state, 'hunter_tf_vars') else None
+                            if tf_checkbox and not tf_checkbox.get():
+                                continue
                         bb_value = f"{d['bb']['pct_b']:.1f}%" if d.get('bb') else "—"
-                        pivot_bb_child = f"- / {bb_value}"
                         child_action = d['action']
                         pctb_child = None
                         if bb_value != "—":
@@ -762,21 +1129,61 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                         child_tags = [d['tag'], z_tag]
                         if pctb_child and pctb_child > 100:
                             child_tags.append('pctb_over')
+                        pivot_label = "S" if zone_name != 'risk' else "P"
+                        trend_letter = trend_label if trend_label != "—" else ""
                         tree.insert(parent_id, tk.END, text=f"  {tf_name}",
                                     values=(
                                         "",
-                                        f"{ico}{d['rsi']:.1f}",
+                                        trend_letter,
+                                        f"{d['rsi']:.1f}",
                                         bb_value,
                                         "",
                                         f"{d['rvi']:.4f}",
                                         f"{d['rvi_s']:.4f}",
-                                        pivot_bb_child,
+                                        p_dist_str,
                                         d['status'],
                                         child_action,
+                                        "",
                                         "",
                                         ""
                                     ),
                                     tags=tuple(child_tags))
+                summary = {
+                    'symbol': s,
+                    'price': p,
+                    'score_pct': score_pct_val,
+                    'score_level': score_level_val,
+                    'score_dist': score_dist_val,
+                    'zone': zone_name,
+                    'action': ac,
+                    'status': st,
+                    'trend_text': trend_val,
+                    'trend_label': trend_label_val,
+                    'trend_breakout': trend_breakout_flag,
+                    'has_ma': has_ma_param,
+                    'ma200_value': ma200_value_param,
+                    'pct_b': pct_b_value_param,
+                    'pivot_label': pivot_bb,
+                    'pivots': pivots_param,
+                    'main_bb': main_bb_param,
+                    'macd': macd_param,
+                    'rsi': main_data_param['rsi'],
+                    'rvi': main_data_param['rvi'],
+                    'rvi_s': main_data_param['rvi_s'],
+                    'breakdown': bk_text,
+                    'next_update': next_up,
+                    'zone_tag': z_tag,
+                    'timeframe': main_tf
+                }
+                strategy_label, strategy_reason = recommend_strategy(summary)
+                summary['strategy_label'] = strategy_label
+                summary['strategy_reason'] = strategy_reason
+                opt_label, opt_reason = recommend_option_strategy(summary)
+                summary['option_strategy'] = opt_label
+                summary['option_reason'] = opt_reason
+                ml_prob = predict_ml_score(summary, getattr(state, 'hunter_model', None))
+                summary['ml_prob'] = ml_prob
+                state.hunter_symbol_summaries[s] = summary
 
             if filter_threshold <= 0 or score_pct >= filter_threshold:
                 state.root.after(0, update_ui)
@@ -795,6 +1202,19 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
         state.root.after(0, lambda: state.hunter_status_label.config(text=f"✓ OK {datetime.now().strftime('%H:%M')}", foreground="green") if hasattr(state, 'hunter_status_label') else None)
 
     threading.Thread(target=run, daemon=True).start()
+
+
+def force_refresh_symbol_now(state, symbol):
+    if not symbol:
+        return
+    state.hunter_next_update[symbol] = 0
+    refresh_hunter(
+        state, getattr(state, 'hunter_tree', None),
+        getattr(state, 'hunter_rsi_p', None),
+        getattr(state, 'hunter_rvi_p', None),
+        getattr(state, 'hunter_tf_v', None),
+        force=True, force_symbol=symbol
+    )
 
 def update_hunter_symbols_ui(state, frame):
     for w in frame.winfo_children(): w.destroy()
@@ -942,13 +1362,13 @@ def create_swing_hunter_tab(parent, state):
     
     # Výber časových rámcov (multi-select by bol fajn, ale zatiaľ skúsime fixné sady alebo prepínač)
     ttk.Label(ctrl, text="Základný TF:").pack(side='left', padx=(15, 5))
-    tf_v = tk.StringVar(value="1 hour"); ttk.Combobox(ctrl, textvariable=tf_v, values=["15 mins", "1 hour", "4 hours", "1 day"], width=10).pack(side='left', padx=5)
+    tf_v = tk.StringVar(value="4 hours"); ttk.Combobox(ctrl, textvariable=tf_v, values=["15 mins", "1 hour", "4 hours", "1 day", "1 week"], width=10).pack(side='left', padx=5)
     
     tf_opts_frame = ttk.Frame(ctrl)
     tf_opts_frame.pack(fill='x', pady=(10, 0))
     ttk.Label(tf_opts_frame, text="TF analýza:").pack(side='left', padx=5)
     state.hunter_tf_vars = {}
-    for tf_name in ["15 mins", "1 hour", "4 hours", "1 day"]:
+    for tf_name in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]:
         var = tk.BooleanVar(value=True)
         state.hunter_tf_vars[tf_name] = var
         ttk.Checkbutton(tf_opts_frame, text=tf_name, variable=var,
@@ -962,7 +1382,6 @@ def create_swing_hunter_tab(parent, state):
     score_combo.bind("<<ComboboxSelected>>", lambda e: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v))
     highlight_frame = tk.Frame(ctrl, highlightbackground='#2e7d32', highlightthickness=2, bd=0)
     highlight_frame.pack(side='right', padx=10, pady=2)
-    ttk.Button(highlight_frame, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", command=lambda: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v, force=True)).pack(padx=2, pady=2)
     state.hunter_last_scores = {}
     state.hunter_last_update = {}
     state.hunter_background_refresh_interval = 3600
@@ -972,7 +1391,7 @@ def create_swing_hunter_tab(parent, state):
 
     t_frame = ttk.Frame(frame); t_frame.pack(fill='both', expand=True, pady=10)
     # Upravené stĺpce pre Tree structure (Skóre a %B)
-    cols = ('price', 'rsi_score', 'pct_b', 'next_update', 'rvi', 'rvi_sig', 'p_dist_bb', 'status', 'action', 'pl_signal', 'breakdown')
+    cols = ('price', 'trend', 'rsi_score', 'pct_b', 'next_update', 'rvi', 'rvi_sig', 'p_dist_bb', 'status', 'action', 'ml_prob', 'breakdown', 'pl_signal')
     tree = ttk.Treeview(t_frame, columns=cols, show='tree headings')
     
     tree._sort_states = {'#0': False, 'rsi_score': False}
@@ -981,18 +1400,20 @@ def create_swing_hunter_tab(parent, state):
         sort_hunter_tree_parents(tree, col, reverse)
         tree._sort_states[col] = not reverse
 
-    tree.heading('#0', text='Symbol / Timeframe', command=lambda: _on_sort('#0')); tree.column('#0', width=150, anchor='w')
+    tree.heading('#0', text='Sym/Tim', command=lambda: _on_sort('#0')); tree.column('#0', width=150, anchor='w')
     tree.heading('price', text='Cena'); tree.column('price', width=90, anchor='center')
-    tree.heading('rsi_score', text='RSI / Skóre', command=lambda: _on_sort('rsi_score')); tree.column('rsi_score', width=100, anchor='center')
+    tree.heading('trend', text='T(MA200)'); tree.column('trend', width=140, anchor='center')
+    tree.heading('rsi_score', text='RSI/SK', command=lambda: _on_sort('rsi_score')); tree.column('rsi_score', width=100, anchor='center')
     tree.heading('pct_b', text='%B'); tree.column('pct_b', width=80, anchor='center')
     tree.heading('next_update', text='Dalšia akt.'); tree.column('next_update', width=80, anchor='center')
     tree.heading('rvi', text='RVI'); tree.column('rvi', width=90, anchor='center')
     tree.heading('rvi_sig', text='RVI Sig'); tree.column('rvi_sig', width=90, anchor='center')
-    tree.heading('p_dist_bb', text='Pivot / %B'); tree.column('p_dist_bb', width=150, anchor='center')
+    tree.heading('p_dist_bb', text='Pivot'); tree.column('p_dist_bb', width=120, anchor='center')
     tree.heading('status', text='Stav'); tree.column('status', width=150, anchor='center')
-    tree.heading('action', text='Akcia'); tree.column('action', width=180, anchor='center')
+    tree.heading('action', text='Akcia'); tree.column('action', width=160, anchor='center')
+    tree.heading('ml_prob', text='ML P(%)'); tree.column('ml_prob', width=80, anchor='center')
+    tree.heading('breakdown', text='Rozklad'); tree.column('breakdown', width=200, anchor='w')
     tree.heading('pl_signal', text='P/L Signálu'); tree.column('pl_signal', width=100, anchor='center')
-    tree.heading('breakdown', text='Rozklad'); tree.column('breakdown', width=220, anchor='w')
 
     tree.pack(side='left', fill='both', expand=True)
     sb = ttk.Scrollbar(t_frame, command=tree.yview); sb.pack(side='right', fill='y'); tree.configure(yscrollcommand=sb.set)
@@ -1020,8 +1441,262 @@ def create_swing_hunter_tab(parent, state):
     tree.tag_configure('zone_neutral', foreground='#424242')
     tree.tag_configure('pl_profit', background='#c8e6c9')
     tree.tag_configure('pl_loss', background='#ffcdd2')
+    tree.tag_configure('trend_bull', background='#e8f5e9')
+    tree.tag_configure('trend_bear', background='#ffebee')
+    tree.tag_configure('trend_breakout', background='#ffe082', foreground='#212121')
+    tree.tag_configure('pinned', background='#fff8e1')
+    if not hasattr(state, 'hunter_pinned_symbols'):
+        state.hunter_pinned_symbols = []
+    if not hasattr(state, 'hunter_symbol_summaries'):
+        state.hunter_symbol_summaries = {}
+    if not hasattr(state, 'hunter_trade_plan_windows'):
+        state.hunter_trade_plan_windows = {}
+    state.hunter_extract_window = getattr(state, 'hunter_extract_window', None)
+    state.hunter_extract_refresh_job = getattr(state, 'hunter_extract_refresh_job', None)
+    state.hunter_extract_tree = getattr(state, 'hunter_extract_tree', None)
+    state.hunter_extract_show_pin_var = getattr(state, 'hunter_extract_show_pin_var', tk.BooleanVar(value=False))
+    state.hunter_model = _load_model_file()
+    _auto_train_model_if_needed(state)
+    if not hasattr(state, 'hunter_close_hook_set'):
+        def _on_close():
+            try:
+                _train_model_async(state, notify=False, label=getattr(state, 'hunter_status_label', None))
+            finally:
+                state.root.destroy()
+        state.root.protocol("WM_DELETE_WINDOW", _on_close)
+        state.hunter_close_hook_set = True
+
+    def build_extract_rows(show_only_pins=False):
+        pinned = set(getattr(state, 'hunter_pinned_symbols', []))
+        summaries = getattr(state, 'hunter_symbol_summaries', {})
+        scores = getattr(state, 'hunter_last_scores', {})
+        candidates = set(summaries.keys()) | pinned
+        rows = []
+        for sym in candidates:
+            summary = summaries.get(sym)
+            score = summary.get('score_pct') if summary else scores.get(sym)
+            if show_only_pins and sym not in pinned:
+                continue
+            if sym not in pinned and (score is None or score < 60):
+                continue
+            rows.append((score if score is not None else -1, sym, summary))
+        rows.sort(key=lambda t: t[0], reverse=True)
+        return rows
+
+    def schedule_extract_refresh():
+        window = state.hunter_extract_window
+        if not window or not window.winfo_exists() or not window.winfo_viewable():
+            return
+        if state.hunter_extract_refresh_job:
+            try:
+                window.after_cancel(state.hunter_extract_refresh_job)
+            except Exception:
+                pass
+        state.hunter_extract_refresh_job = window.after(5000, refresh_extract_tree)
+
+    def refresh_extract_tree(force=False):
+        window = state.hunter_extract_window
+        tree = state.hunter_extract_tree
+        if not window or not window.winfo_exists() or not window.winfo_viewable() or not tree:
+            return
+        tree.delete(*tree.get_children())
+        rows = build_extract_rows(state.hunter_extract_show_pin_var.get())
+        if not rows:
+            tree.insert('', tk.END, values=('—', '—', '—', '—', '—', '—', '—', '—', '—', '—', '—', 'Čaká na dáta'), tags=('zone_neutral',))
+            update_extract_selection_buttons()
+            schedule_extract_refresh()
+            return
+        for _, sym, summary in rows:
+            summary = summary or {
+                'symbol': sym,
+                'score_pct': getattr(state, 'hunter_last_scores', {}).get(sym),
+                'zone': 'neutral',
+                'action': 'Čaká',
+                'strategy_label': '—',
+                'strategy_reason': 'Čaká na dáta',
+                'option_strategy': '—',
+                'option_reason': 'Čaká na dáta',
+                'trend_text': '—',
+                'pivot_label': '—'
+            }
+            price = summary.get('price')
+            score = summary.get('score_pct')
+            pct_b = summary.get('pct_b')
+            zone = summary.get('zone', 'neutral')
+            tags = []
+            if zone == 'risk':
+                tags.append('zone_risk')
+            elif zone == 'hunt':
+                tags.append('zone_hunt')
+            elif zone == 'hold':
+                tags.append('zone_hold')
+            if sym in getattr(state, 'hunter_pinned_symbols', []):
+                tags.append('pinned')
+            display_price = f"{price:.2f}" if price is not None else "—"
+            display_score = f"{score:.0f}%" if score is not None else "—"
+            display_pctb = f"{pct_b:.1f}%" if pct_b is not None else "—"
+            ml_prob = summary.get('ml_prob')
+            ml_text = f"{ml_prob*100:.0f}%" if ml_prob is not None else "—"
+            extract_tree_values = (
+                sym,
+                display_price,
+                display_score,
+                zone.capitalize(),
+                summary.get('trend_text', '—'),
+                display_pctb,
+                summary.get('pivot_label', '—'),
+                summary.get('action', '—'),
+                summary.get('strategy_label', '—'),
+                summary.get('option_strategy', '—'),
+                ml_text,
+                summary.get('option_reason', summary.get('strategy_reason', 'Čaká na dáta'))
+            )
+            tree.insert('', tk.END, iid=sym, values=extract_tree_values, tags=tuple(dict.fromkeys(tags)))
+        update_extract_selection_buttons()
+        schedule_extract_refresh()
+        state.hunter_extract_tree._sort_state = {'col': None, 'reverse': False}
+
+    def update_extract_selection_buttons(event=None):
+        tree = state.hunter_extract_tree
+        btn = getattr(state, 'hunter_extract_trade_btn', None)
+        if not tree or not btn:
+            return
+        sel = tree.selection()
+        btn.config(state='normal' if sel else 'disabled')
+
+    def handle_extract_double_click(event):
+        tree = state.hunter_extract_tree
+        if not tree:
+            return
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        force_refresh_symbol_now(state, item)
+
+    def open_selected_trade_plan():
+        tree = state.hunter_extract_tree
+        if not tree:
+            return
+        sel = tree.selection()
+        if not sel:
+            return
+        symbol = sel[0]
+        summary = state.hunter_symbol_summaries.get(symbol, {'symbol': symbol})
+        open_trade_plan_window(state, summary)
+
+    def open_extract_window():
+        existing = state.hunter_extract_window
+        if existing and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            state.hunter_extract_show_pin_var.set(state.hunter_extract_show_pin_var.get())
+            refresh_extract_tree()
+            return
+        window = tk.Toplevel(state.root)
+        window.title("Swing Hunter Výťah")
+        window.geometry("960x360")
+        state.hunter_extract_window = window
+        window.protocol("WM_DELETE_WINDOW", window.withdraw)
+
+        control_frame = ttk.Frame(window, padding=8)
+        control_frame.pack(fill='x')
+        ttk.Checkbutton(control_frame, text="Zobraziť len pin", variable=state.hunter_extract_show_pin_var,
+                        command=lambda: refresh_extract_tree(force=True)).pack(side='left')
+        ttk.Button(control_frame, text="🔄 Refresh", command=lambda: refresh_extract_tree(force=True)).pack(side='left', padx=5)
+        ttk.Button(control_frame, text="🔄 Pretrénovať ML", command=lambda: _train_model_async(state, notify=True)).pack(side='left', padx=5)
+        trade_btn = ttk.Button(control_frame, text="📝 Trade plan", command=open_selected_trade_plan, state='disabled')
+        trade_btn.pack(side='right')
+        state.hunter_extract_trade_btn = trade_btn
+
+        tree_frame = ttk.Frame(window)
+        tree_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        extract_cols = ('symbol', 'price', 'score', 'zone', 'trend', 'pct_b', 'pivot', 'action', 'strategy', 'option', 'ml_prob', 'reason')
+        extract_tree = ttk.Treeview(tree_frame, columns=extract_cols, show='headings')
+        heading_labels = ["Symbol", "Cena", "Skóre", "Zóna", "T(MA200)", "%B", "Pivot", "Akcia", "Stratégia", "Opcie", "ML P(%)", "Dôvod"]
+        for col, label in zip(extract_cols, heading_labels):
+            extract_tree.heading(col, text=label, command=lambda c=col: sort_extract_tree(c))
+            extract_tree.column(col, width=80, anchor='center')
+        extract_tree.column('symbol', width=90, anchor='w')
+        extract_tree.column('reason', width=240, anchor='w')
+        extract_tree.pack(side='left', fill='both', expand=True)
+        vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=extract_tree.yview)
+        vsb.pack(side='right', fill='y')
+        extract_tree.configure(yscrollcommand=vsb.set)
+        extract_tree.bind("<<TreeviewSelect>>", update_extract_selection_buttons)
+        extract_tree.bind("<Double-1>", handle_extract_double_click)
+
+        state.hunter_extract_tree = extract_tree
+        refresh_extract_tree()
+
+    def sort_extract_tree(col):
+        tree = state.hunter_extract_tree
+        if not tree:
+            return
+        data = []
+        for iid in tree.get_children():
+            vals = tree.item(iid, 'values')
+            data.append((iid, vals))
+        reverse = False
+        sort_state = getattr(tree, '_sort_state', {'col': None, 'reverse': False})
+        if sort_state.get('col') == col:
+            reverse = not sort_state.get('reverse', False)
+        tree._sort_state = {'col': col, 'reverse': reverse}
+
+        def parse_val(v, idx):
+            if idx in (1, 2, 4, 5, 10):  # numeric columns (price, score, trend?, pct_b, ml_prob)
+                try:
+                    return float(str(v).replace('%', '').replace('+', '').strip())
+                except:
+                    return -1e9
+            return str(v).lower()
+
+        col_index = extract_cols.index(col)
+        data.sort(key=lambda item: parse_val(item[1][col_index], col_index), reverse=reverse)
+        for idx, (iid, _) in enumerate(data):
+            tree.move(iid, '', idx)
+
+    def toggle_pin_symbol(sym):
+        pinned = getattr(state, 'hunter_pinned_symbols', [])
+        if sym in pinned:
+            pinned = [p for p in pinned if p != sym]
+        else:
+            pinned = pinned + [sym]
+        state.hunter_pinned_symbols = pinned
+        state.save_settings_file()
+        if state.hunter_extract_window and state.hunter_extract_window.winfo_exists():
+            refresh_extract_tree(force=True)
+        for item in tree.get_children():
+            if tree.item(item, 'text') == sym:
+                tags = list(tree.item(item, 'tags'))
+                if sym in pinned:
+                    if 'pinned' not in tags:
+                        tags.append('pinned')
+                else:
+                    tags = [t for t in tags if t != 'pinned']
+                tree.item(item, tags=tuple(dict.fromkeys(tags)))
+                break
+
+    def show_pin_menu(event):
+        item = tree.identify_row(event.y)
+        if not item or tree.parent(item):
+            return
+        sym = tree.item(item, 'text')
+        if not sym:
+            return
+        pinned = getattr(state, 'hunter_pinned_symbols', [])
+        label = "📌 Pin" if sym not in pinned else "📍 Unpin"
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label=label, command=lambda sym=sym: toggle_pin_symbol(sym))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    tree.bind("<Button-3>", show_pin_menu)
+    ttk.Button(highlight_frame, text="📋 Výťah", command=open_extract_window).pack(padx=2, pady=2)
+    ttk.Button(highlight_frame, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", command=lambda: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v, force=True)).pack(padx=2, pady=2)
     state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v = tree, rsi_p, rvi_p, tf_v
-    state.hunter_multi_tf_var = multi_tf_var
     def _force_refresh(event):
         item = tree.identify_row(event.y)
         if not item:
@@ -1039,3 +1714,112 @@ def create_swing_hunter_tab(parent, state):
     footer.pack(fill='x')
     ttk.Button(footer, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", command=lambda: refresh_hunter(state, tree, rsi_p, rvi_p, tf_v, force=True)).pack(pady=10)
     return frame
+
+
+def refresh_trade_plan_vars(window, symbol, summary):
+    plan_vars = getattr(window, 'plan_vars', None)
+    if not plan_vars:
+        return
+    data = summary or {}
+
+    def _fmt(val):
+        return f"{val:.2f}" if isinstance(val, (int, float)) else ("—" if val is None else str(val))
+
+    entry = data.get('price')
+    pivots = data.get('pivots') or {}
+    bb = data.get('main_bb') or {}
+    sl = pivots.get('S1') or pivots.get('S2') or (entry * 0.985 if entry else None)
+    tp1 = pivots.get('P') or bb.get('mid') or entry
+    tp2 = bb.get('upper')
+    rr_val = None
+    if entry and sl and tp1 and entry != sl:
+        rr_val = (tp1 - entry) / abs(entry - sl)
+
+    plan_vars['entry'].set(_fmt(entry))
+    plan_vars['sl'].set(_fmt(sl))
+    plan_vars['tp1'].set(_fmt(tp1))
+    plan_vars['tp2'].set(_fmt(tp2))
+    plan_vars['rr'].set(f"{rr_val:.2f}:1" if rr_val else "—")
+    plan_vars['action'].set(data.get('action', '—'))
+    plan_vars['strategy'].set(data.get('strategy_label', '—'))
+    plan_vars['reason'].set(data.get('strategy_reason', '—'))
+    plan_vars['option_strategy'].set(data.get('option_strategy', '—'))
+    plan_vars['option_reason'].set(data.get('option_reason', data.get('strategy_reason', '—')))
+    ml_prob = data.get('ml_prob')
+    if ml_prob is not None:
+        plan_vars['ml_prob'].set(f"{ml_prob*100:.0f}%")
+    else:
+        plan_vars['ml_prob'].set("—")
+
+
+def open_trade_plan_window(state, summary):
+    symbol = summary.get('symbol')
+    if not symbol:
+        return
+    plan_windows = getattr(state, 'hunter_trade_plan_windows', {})
+    existing = plan_windows.get(symbol)
+    if existing and existing.winfo_exists():
+        existing.lift()
+        existing.focus_force()
+        refresh_trade_plan_vars(existing, symbol, state.hunter_symbol_summaries.get(symbol, summary))
+        return
+
+    window = tk.Toplevel(state.root)
+    window.title(f"Trade plan – {symbol}")
+    window.geometry("360x320")
+    window.transient(state.root)
+    state.hunter_trade_plan_windows[symbol] = window
+
+    plan_vars = {
+        'entry': tk.StringVar(value="—"),
+        'sl': tk.StringVar(value="—"),
+        'tp1': tk.StringVar(value="—"),
+        'tp2': tk.StringVar(value="—"),
+        'rr': tk.StringVar(value="—"),
+        'action': tk.StringVar(value="—"),
+        'strategy': tk.StringVar(value="—"),
+        'reason': tk.StringVar(value="—"),
+        'option_strategy': tk.StringVar(value="—"),
+        'option_reason': tk.StringVar(value="—"),
+        'ml_prob': tk.StringVar(value="—")
+    }
+
+    window.plan_vars = plan_vars
+
+    info_frame = ttk.Frame(window, padding=10)
+    info_frame.pack(fill='x')
+    for idx, (label, key) in enumerate([
+        ("Entry:", "entry"),
+        ("SL:", "sl"),
+        ("TP1:", "tp1"),
+        ("TP2:", "tp2"),
+        ("R:R:", "rr"),
+        ("Akcia:", "action"),
+        ("Stratégia:", "strategy")
+    ]):
+        ttk.Label(info_frame, text=label).grid(row=idx, column=0, sticky='w', pady=2)
+        ttk.Label(info_frame, textvariable=plan_vars[key]).grid(row=idx, column=1, sticky='e', padx=(5, 0))
+
+    ttk.Label(window, text="Dôvod:", font=('Arial', 9, 'bold')).pack(anchor='w', padx=10, pady=(10, 0))
+    ttk.Label(window, textvariable=plan_vars['reason'], wraplength=320, justify='left').pack(fill='x', padx=10)
+    ttk.Label(window, text="ML P(úspech):", font=('Arial', 9, 'bold')).pack(anchor='w', padx=10, pady=(8, 0))
+    ttk.Label(window, textvariable=plan_vars['ml_prob']).pack(anchor='w', padx=10)
+
+    btn_frame = ttk.Frame(window, padding=(10, 5))
+    btn_frame.pack(fill='x')
+
+    def refresh_plan():
+        force_refresh_symbol_now(state, symbol)
+        state.root.after(1500, lambda: refresh_trade_plan_vars(window, symbol, state.hunter_symbol_summaries.get(symbol, summary)))
+
+    ttk.Button(btn_frame, text="🔄 Force refresh", command=refresh_plan).pack(side='left')
+    ttk.Button(btn_frame, text="💾 Uložiť plán", command=lambda: save_trade_plan_to_file(symbol, plan_vars)).pack(side='left', padx=5)
+
+    def on_close():
+        plan_windows.pop(symbol, None)
+        window.destroy()
+
+    ttk.Button(btn_frame, text="Zavrieť", command=on_close).pack(side='right')
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+    refresh_trade_plan_vars(window, symbol, state.hunter_symbol_summaries.get(symbol, summary))
