@@ -29,7 +29,8 @@ def main():
     # --- CACHE LOGIKA ---
     cache_dir = BASE_DIR / 'cache' / 'history'
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{args.symbol}_{args.barSize.replace(' ', '_')}.json"
+    # Pridaná dĺžka (duration) do názvu súboru, aby sa nemiešali krátke a dlhé histórie
+    cache_file = cache_dir / f"{args.symbol}_{args.barSize.replace(' ', '_')}_{args.duration.replace(' ', '')}.json"
     
     ttl = 900 
     if "15 mins" in args.barSize: ttl = 300

@@ -14,9 +14,19 @@ import json
 import subprocess
 import math
 import csv
+import numpy as np
 from datetime import datetime
 import pandas as pd
 import pandas_ta as ta
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 SCORE_FILTER_MAP = {
     "Žiadny filter": 0.0,
@@ -165,10 +175,10 @@ def recommend_strategy(summary):
             extras.append("RVI>Sig")
         if macd and macd.get('is_cross'):
             extras.append("MACD cross")
-        reason = "Low %B"
+        reason = "MV zóna"
         if extras:
             reason = f"{reason} ({', '.join(extras)})"
-        return "Mean Reversion (Hunt)", reason
+        return "MeanRev", reason
 
     if trend_breakout or (trend_label == 'Býk' and score_pct >= 70):
         reason = "MA200 breakout" if trend_breakout else "Bull trend"
@@ -197,7 +207,7 @@ def recommend_option_strategy(summary):
         return "Call debit spread", "Trend BULL / breakout"
 
     if pct_b is not None and pct_b < 30:
-        return "Bull put spread", "Mean reversion zóna (%B<30)"
+        return "Bull put spread", "MV zóna (%B<30)"
 
     if trend_label == 'Bear':
         return "Bear call spread", "BEAR trend – hrať rezistenciu"
@@ -291,6 +301,127 @@ def save_trade_plan_to_file(symbol, plan_vars):
         messagebox.showerror("Trade plan", f"Nepodarilo sa uložiť plán:\n{e}")
 
 
+def load_saved_trade_plans():
+    _ensure_trade_plan_file()
+    rows = []
+    try:
+        with open(TRADE_PLAN_FILE, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+    except Exception:
+        pass
+    return rows
+
+
+def apply_saved_plan_to_vars(plan_vars, row):
+    if not plan_vars or not row:
+        return
+    mapping = {
+        'entry': 'Entry',
+        'sl': 'SL',
+        'tp1': 'TP1',
+        'tp2': 'TP2',
+        'rr': 'R_R',
+        'action': 'Action',
+        'strategy': 'Strategy',
+        'reason': 'Reason',
+        'option_strategy': 'OptionStrategy',
+        'option_reason': 'OptionReason'
+    }
+    for key, column in mapping.items():
+        val = row.get(column, '') or ''
+        plan_vars[key].set(val if val.strip() else "—")
+    ml_var = plan_vars.get('ml_prob')
+    if ml_var:
+        ml_var.set("—")
+
+
+def open_saved_trade_plan_browser(state, plan_vars):
+    existing = getattr(state, 'hunter_saved_plans_window', None)
+    if existing and existing.winfo_exists():
+        existing.deiconify()
+        existing.lift()
+        existing.focus_force()
+        return
+
+    window = tk.Toplevel(state.root)
+    window.title("Uložené trade plány")
+    window.geometry("720x360")
+    window.transient(state.root)
+    state.hunter_saved_plans_window = window
+
+    cols = ('timestamp', 'symbol', 'entry', 'sl', 'tp1', 'tp2', 'rr', 'action', 'strategy', 'reason')
+    tree_frame = ttk.Frame(window)
+    tree_frame.pack(fill='both', expand=True, padx=10, pady=(10, 0))
+    tree = ttk.Treeview(tree_frame, columns=cols, show='headings', height=10)
+    labels = ["Čas", "Symbol", "Entry", "SL", "TP1", "TP2", "R:R", "Akcia", "Stratégia", "Dôvod"]
+    for col, label in zip(cols, labels):
+        tree.heading(col, text=label)
+        tree.column(col, anchor='center')
+    tree.column('reason', width=260, anchor='w')
+    tree.pack(side='left', fill='both', expand=True)
+    vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
+    vsb.pack(side='right', fill='y')
+    tree.configure(yscrollcommand=vsb.set)
+
+    tree.saved_plan_data = {}
+
+    csv_column_map = {
+        'timestamp': 'Timestamp',
+        'symbol': 'Symbol',
+        'entry': 'Entry',
+        'sl': 'SL',
+        'tp1': 'TP1',
+        'tp2': 'TP2',
+        'rr': 'R_R',
+        'action': 'Action',
+        'strategy': 'Strategy',
+        'reason': 'Reason'
+    }
+
+    btn_frame = ttk.Frame(window, padding=10)
+    btn_frame.pack(fill='x')
+
+    def refresh_saved_plans():
+        rows = load_saved_trade_plans()
+        tree.delete(*tree.get_children())
+        tree.saved_plan_data.clear()
+        for idx, row in enumerate(rows):
+            iid = f"plan_{idx}"
+            tree.saved_plan_data[iid] = row
+            values = tuple((row.get(csv_column_map.get(col, col), '') or '—') for col in cols)
+            tree.insert('', tk.END, iid=iid, values=values)
+        load_btn.config(state='disabled')
+
+    def load_selected_plan():
+        sel = tree.selection()
+        if not sel:
+            return
+        row = tree.saved_plan_data.get(sel[0])
+        if not row:
+            return
+        apply_saved_plan_to_vars(plan_vars, row)
+        window.focus_force()
+
+    load_btn = ttk.Button(btn_frame, text="Načítať do aktuálneho plánu", command=load_selected_plan, state='disabled')
+    load_btn.pack(side='left')
+    ttk.Button(btn_frame, text="🔄 Obnoviť", command=refresh_saved_plans).pack(side='left', padx=5)
+    ttk.Button(btn_frame, text="Zavrieť", command=window.destroy).pack(side='right')
+
+    def on_selection(evt):
+        load_btn.config(state='normal' if tree.selection() else 'disabled')
+
+    tree.bind("<<TreeviewSelect>>", on_selection)
+    tree.bind("<Double-1>", lambda e: load_selected_plan())
+
+    def on_close():
+        state.hunter_saved_plans_window = None
+        window.destroy()
+
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+    refresh_saved_plans()
 def _load_model_file():
     if not os.path.exists(MODEL_FILE):
         return None
@@ -577,6 +708,29 @@ def calculate_rvi(candles, period=10):
     rvi_sig = (rvi_hist[-1] + 2*rvi_hist[-2] + 2*rvi_hist[-3] + rvi_hist[-4]) / 6
     return rvi_line, rvi_sig
 
+
+def calculate_atr(candles, period=14):
+    """Vypočíta ATR pre dané sviečky."""
+    if len(candles) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(candles)):
+        current = candles[i]
+        prev = candles[i - 1]
+        high = current['high']
+        low = current['low']
+        close_prev = prev['close']
+        tr = max(
+            high - low,
+            abs(high - close_prev),
+            abs(low - close_prev)
+        )
+        trs.append(tr)
+    if len(trs) < period:
+        return None
+    atr = sum(trs[-period:]) / period
+    return atr
+
 # --- PIVOT POINTS ---
 
 def get_pivot_distance(price, pivots):
@@ -644,7 +798,23 @@ def sort_hunter_tree_parents(tree, column, reverse=False):
 
 # --- HLAVNÁ LOGIKA ---
 
+def stop_hunter(state):
+    """Okamžite zastaví všetky bežiace skeny"""
+    state.hunter_session_id = getattr(state, 'hunter_session_id', 0) + 1
+    try:
+        subprocess.run(['pkill', '-f', 'tws_fetch_history.py'], capture_output=True)
+    except: pass
+    if hasattr(state, 'hunter_status_label'):
+        state.hunter_status_label.config(text="⏹️ ZASTAVENÉ", foreground="red")
+    print("🛑 Hunter: Manuálne zastavené užívateľom.")
+
 def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=None):
+    # 0. Zastavenie akýchkoľvek visiacich procesov skenovania (prevencia "duchárskeho" testovania)
+    try:
+        if not force_symbol: # Pri hromadnom skene vyčistíme staré procesy
+            subprocess.run(['pkill', '-f', 'tws_fetch_history.py'], capture_output=True)
+    except: pass
+
     # 1. Získať symboly (len tie zaškrtnuté v Hunterovi)
     symbols = []
     try:
@@ -664,6 +834,9 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             tree.delete(item_id)
 
     if not symbols:
+        try:
+            subprocess.run(['pkill', '-f', 'tws_fetch_history.py'], capture_output=True)
+        except: pass
         if force: messagebox.showwarning("Swing Hunter", "Vyberte symboly.")
         if hasattr(state, 'hunter_status_label'):
             state.hunter_status_label.config(text="✓ Vyčistené", foreground="gray")
@@ -680,34 +853,57 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
         filter_threshold = SCORE_FILTER_MAP.get(state.hunter_score_filter_var.get(), 0.0)
     background_interval = getattr(state, 'hunter_background_refresh_interval', 3600)
 
+    # NOVÉ: Zachytenie hodnôt z Tkinter premenných pred spustením thready (Thread Safety)
+    current_tf_val = tf_var.get()
+    rsi_p_val = int(rsi_p.get()) if rsi_p.get().isdigit() else 14
+    rvi_p_val = int(rvi_p.get()) if rvi_p.get().isdigit() else 10
+    port_val = getattr(state, 'current_port', "7497")
+    selected_symbols_set = set(symbols)
+
     selected_tfs = []
     if hasattr(state, 'hunter_tf_vars'):
         selected_tfs = [tf for tf, var in state.hunter_tf_vars.items() if var.get()]
-    if tf_var.get() not in selected_tfs:
-        selected_tfs.insert(0, tf_var.get())
+    if current_tf_val not in selected_tfs:
+        selected_tfs.insert(0, current_tf_val)
     if "1 day" not in selected_tfs:
         selected_tfs.append("1 day")  # always fetch daily for MA200/pivots
     if not selected_tfs:
-        selected_tfs = [tf_var.get()]
+        selected_tfs = [current_tf_val]
 
     # Timeframes na skenovanie
     tfs = selected_tfs
+
+    # Session ID pre zastavenie starých thready
+    session_id = getattr(state, 'hunter_session_id', 0) + 1
+    state.hunter_session_id = session_id
 
     def run():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         py = os.path.join(root, 'venv', 'bin', 'python3')
         if not os.path.exists(py): py = sys.executable
         scr = os.path.join(root, 'scripts', 'tws_fetch_history.py')
-        port = str(state.port_var.get())
+        port = port_val
 
         for sym in symbols:
+            # Kontrola či už nebeží novší sken
+            if getattr(state, 'hunter_session_id', 0) != session_id:
+                print(f"🛑 Hunter: Zastavujem starý sken (Session {session_id})")
+                return
+
+            # Väčšia pauza pre stabilitu TWS pri hromadnom skene
+            if not force_symbol and len(symbols) > 1:
+                time.sleep(0.8)
+
             if force_symbol and sym != force_symbol:
                 continue
-
+            
             # Kontrola počas behu: Ak už symbol nie je vybratý, preskočíme ho
-            active_symbols = [s for s, v in state.hunter_selected_symbols.items() if v.get()]
-            if sym not in active_symbols:
+            if sym not in selected_symbols_set:
                 continue
+            
+            # Kontrola či root ešte existuje
+            if not state.root or not state.root.winfo_exists():
+                return
 
             next_ts = state.hunter_next_update.get(sym, 0)
             if not force and not force_symbol and time.time() < next_ts:
@@ -720,114 +916,186 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             if not (force or force_symbol == sym) and filter_threshold > 0 and last_score is not None and last_score < filter_threshold and (time.time() - last_update) < background_interval:
                 continue
 
-            # --- 1. ZÍSKANIE PIVOT DATA (Predchádzajúci deň/týždeň) ---
-            pivots = None
-            try:
-                current_tf = tf_var.get()
-                if "week" in current_tf:
-                    pivot_tf = "1 week"
-                    pivot_dur = "3 M"
-                elif current_tf == "1 day":
-                    pivot_tf = "1 week"
-                    pivot_dur = "1 M"
-                else:
-                    pivot_tf = "1 day"
-                    pivot_dur = "10 D"
-                
-                cmd_p = [py, scr, '--symbol', sym, '--barSize', pivot_tf, '--duration', pivot_dur, '--port', port]
-                res_p = subprocess.run(cmd_p, capture_output=True, text=True, timeout=50, cwd=root)
-                if res_p.returncode == 0:
-                    p_data = json.loads(res_p.stdout.strip())
-                    if p_data.get('success') and len(p_data['candles']) >= 2:
-                        # Posledná sviečka [-1] je dnešná (neúplná), predposledná [-2] je včerajšia (úplná)
-                        prev_bar = p_data['candles'][-2]
-                        pivots = calculate_pivots(prev_bar)
-            except Exception as pe:
-                print(f"❌ Pivot fetch error {sym}: {pe}")
-
-            results_tf = {} # tf -> {rsi, rvi, rvi_s, price, status, action, tag}
+            # --- 1. SŤAHOVANIE DENNÝCH DÁT AKO PRVÉ ---
+            # 1. Stiahneme '1 day' dáta pre:
+            #    a) Pred-filter (Smart Filter)
+            #    b) Výpočet MA200
+            #    c) Výpočet Pivotov (ak nie je weekly)
             
-            for tf in tfs:
-                dur = "10 D"
-                if "15 mins" in tf:
-                    dur = "5 D"
-                elif "1 hour" in tf:
-                    dur = "25 D"
-                elif "4 hours" in tf:
-                    dur = "60 D"
-                elif tf == "1 day":
-                    dur = "260 D"
-                elif "week" in tf:
-                    dur = "2 Y"
-                elif "day" in tf:
-                    dur = "1 Y"
+            pivots = None
+            day_candles = None
+            ma200_info = None
+            is_skipped = False
+            
+            try:
+                # Použijeme 252 D (pracovný rok) pre lepšiu kompatibilitu s TWS a vynútime čerstvé dáta
+                cmd_d = [py, scr, '--symbol', sym, '--barSize', '1 day', '--duration', '252 D', '--port', port, '--force']
+                
+                res_d = subprocess.run(cmd_d, capture_output=True, text=True, timeout=60, cwd=root)
+                if res_d.returncode == 0:
+                    d_data = json.loads(res_d.stdout.strip())
+                    if d_data.get('success'):
+                        day_candles = d_data['candles']
+                        if day_candles and len(day_candles) >= 20:
+                            # --- SMART FILTER ---
+                            # 1. RSI
+                            d_rsi = calculate_rsi(day_candles, 14)
+                            # 2. Bollinger Middle (SMA20)
+                            d_bb = calculate_bb(day_candles)
+                            d_ma20 = d_bb['mid'] if d_bb else None
+                            d_close = day_candles[-1]['close']
+                            # 3. MA200
+                            ma200_info = calculate_ma200_metrics(day_candles)
+                            d_ma200 = ma200_info.get('value') if ma200_info else None
 
+                            # Ak nie je vynútený refresh jedného symbolu, aplikujeme filter
+                            if not (force or force_symbol):
+                                is_interesting = False
+                                
+                                # A) RSI Extrém
+                                if d_rsi < 40 or d_rsi > 60:
+                                    is_interesting = True
+                                
+                                # B) Blízko BB Stredu (SMA20) - do 1.5%
+                                if d_ma20 and abs((d_close - d_ma20) / d_ma20) < 0.015:
+                                    is_interesting = True
+                                    
+                                # C) Blízko MA200 - do 2.0%
+                                if d_ma200 and abs((d_close - d_ma200) / d_ma200) < 0.02:
+                                    is_interesting = True
+                                
+                                if not is_interesting:
+                                    # Symbol je nudný, preskakujeme ostatné TF, ale stále updatneme UI
+                                    is_skipped = True
+                        else:
+                            print(f"⚠️ {sym}: Málo denných sviečok z TWS ({len(day_candles) if day_candles else 0}/20)")
+                    else:
+                        print(f"❌ {sym}: TWS chyba denného grafu: {d_data.get('error')}")
+            except Exception as e:
+                print(f"❌ Smart Filter Error {sym}: {e}")
+
+            # --- 2. ZÍSKANIE PIVOT DATA (Ak treba weekly) ---
+            current_tf = current_tf_val
+            if not is_skipped and "week" in current_tf:
                 try:
-                    cmd = [py, scr, '--symbol', sym, '--barSize', tf, '--duration', dur, '--port', port]
-                    if force or force_symbol:
-                        cmd.append('--force')
-                    
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=50, cwd=root)
-                    
-                    if res.returncode == 0:
-                        data = json.loads(res.stdout.strip())
-                        if data.get('success'):
-                            c = data['candles']
-                            if c:
-                                try:
-                                    r_p = int(rsi_p.get())
-                                    rv_p = int(rvi_p.get())
-                                except:
-                                    r_p, rv_p = 14, 10
-                                
-                                rsi = calculate_rsi(c, r_p)
-                                rvi, rvi_s = calculate_rvi(c, rv_p)
-                                
-                                # NOVÉ: Bollinger a MACD
-                                bb_data = calculate_bb(c)
-                                macd_data = calculate_macd(c)
-                                
-                                tf_status, tf_action, tf_tag = "Neutral", "Čakať", ""
-                                
-                                # EXTREME OVERWEIGHT logika
-                                if rsi < 30 and bb_data and c[-1]['close'] <= bb_data['lower']:
-                                    tf_status, tf_tag = "⚠️ EXTREME OVERWEIGHT", "alert"
-                                elif rsi < 30: 
-                                    tf_status, tf_tag = "🔥 PREPREDANÉ", "alert"
-                                elif rsi > 70:
-                                    tf_status, tf_tag = "❄️ PREKÚPENÉ", "alert"
-                                
-                                # CONFIRMED logika
-                                if rvi > rvi_s:
-                                    if macd_data and macd_data['is_cross']:
-                                        tf_action, tf_tag = "🚀 CONFIRMED BUY", "buy"
-                                    else:
-                                        tf_action, tf_tag = "✅ BUY", "buy"
-                                elif rsi > 70 and rvi < rvi_s:
-                                    tf_action, tf_tag = "🔻 SHORT", "short"
+                    cmd_p = [py, scr, '--symbol', sym, '--barSize', '1 week', '--duration', '3 M', '--port', port]
+                    res_p = subprocess.run(cmd_p, capture_output=True, text=True, timeout=50, cwd=root)
+                    if res_p.returncode == 0:
+                        p_data = json.loads(res_p.stdout.strip())
+                        if p_data.get('success') and len(p_data['candles']) >= 2:
+                             pivots = calculate_pivots(p_data['candles'][-2])
+                except Exception: pass
+            
+            # --- 3. SŤAHOVANIE OSTATNÝCH TF ---
+            results_tf = {} 
+            
+            # Pridáme už stiahnuté denné dáta do results_tf
+            if day_candles:
+                 # Vypočítame indikátory pre 1 day
+                 d_rsi = calculate_rsi(day_candles, rsi_p_val)
+                 d_rvi, d_rvi_s = calculate_rvi(day_candles, rvi_p_val)
+                 d_bb = calculate_bb(day_candles)
+                 d_macd = calculate_macd(day_candles)
+                 
+                 # Stav pre 1 day
+                 d_status, d_action, d_tag = "Neutral", "Čakať", ""
+                 if is_skipped:
+                     d_status, d_tag = "💤 Nudný (Denný)", "zone_neutral"
+                 elif d_rsi < 30: d_status, d_tag = "🔥 PREPREDANÉ", "alert"
+                 elif d_rsi > 70: d_status, d_tag = "❄️ PREKÚPENÉ", "alert"
+                 
+                 results_tf['1 day'] = {
+                     'rsi': d_rsi, 'rvi': d_rvi, 'rvi_s': d_rvi_s, 
+                     'price': day_candles[-1]['close'], 
+                     'status': d_status, 'action': d_action, 'tag': d_tag,
+                     'bb': d_bb, 'macd': d_macd,
+                     'candles': day_candles
+                 }
 
-                                results_tf[tf] = {
-                                    'rsi': rsi, 'rvi': rvi, 'rvi_s': rvi_s, 
-                                    'price': c[-1]['close'], 
-                                    'status': tf_status, 'action': tf_action, 'tag': tf_tag,
-                                    'bb': bb_data, 'macd': macd_data,
-                                    'candles': c
-                                }
-                except Exception as e:
-                    print(f"❌ Error fetching {sym} {tf}: {e}")
+            if not is_skipped:
+                for tf in tfs:
+                    if tf == '1 day': continue # Už máme
+                    dur = "10 D"
+                    if "15 mins" in tf:
+                        dur = "5 D"
+                    elif "1 hour" in tf:
+                        dur = "25 D"
+                    elif "4 hours" in tf:
+                        dur = "60 D"
+                    elif tf == "1 day":
+                        dur = "252 D"
+                    elif "week" in tf:
+                        dur = "2 Y"
+                    elif "day" in tf:
+                        dur = "252 D"
+
+                    try:
+                        cmd = [py, scr, '--symbol', sym, '--barSize', tf, '--duration', dur, '--port', port]
+                        if force or force_symbol:
+                            cmd.append('--force')
+                        
+                        res = subprocess.run(cmd, capture_output=True, text=True, timeout=50, cwd=root)
+                        
+                        if res.returncode == 0:
+                            data = json.loads(res.stdout.strip())
+                            if data.get('success'):
+                                c = data['candles']
+                                if c:
+                                    r_p, rv_p = rsi_p_val, rvi_p_val
+                                    
+                                    rsi = calculate_rsi(c, r_p)
+                                    rvi, rvi_s = calculate_rvi(c, rv_p)
+                                    
+                                    # NOVÉ: Bollinger a MACD
+                                    bb_data = calculate_bb(c)
+                                    macd_data = calculate_macd(c)
+                                    
+                                    tf_status, tf_action, tf_tag = "Neutral", "Čakať", ""
+                                    
+                                    # EXTREME OVERWEIGHT logika
+                                    if rsi < 30 and bb_data and c[-1]['close'] <= bb_data['lower']:
+                                        tf_status, tf_tag = "⚠️ EXTREME OVERWEIGHT", "alert"
+                                    elif rsi < 30: 
+                                        tf_status, tf_tag = "🔥 PREPREDANÉ", "alert"
+                                    elif rsi > 70:
+                                        tf_status, tf_tag = "❄️ PREKÚPENÉ", "alert"
+                                    
+                                    # CONFIRMED logika
+                                    if rvi > rvi_s:
+                                        if macd_data and macd_data['is_cross']:
+                                            tf_action, tf_tag = "🚀 CONFIRMED BUY", "buy"
+                                        else:
+                                            tf_action, tf_tag = "✅ BUY", "buy"
+                                    elif rsi > 70 and rvi < rvi_s:
+                                        tf_action, tf_tag = "🔻 SHORT", "short"
+
+                                    results_tf[tf] = {
+                                        'rsi': rsi, 'rvi': rvi, 'rvi_s': rvi_s, 
+                                        'price': c[-1]['close'], 
+                                        'status': tf_status, 'action': tf_action, 'tag': tf_tag,
+                                        'bb': bb_data, 'macd': macd_data,
+                                        'candles': c
+                                    }
+                    except Exception as e:
+                        print(f"❌ Error fetching {sym} {tf}: {e}")
 
             # Vyhodnotenie po získaní všetkých TF pre daný symbol
             if not results_tf: continue
 
-            main_tf = tf_var.get()
-            if main_tf not in results_tf: main_tf = list(results_tf.keys())[0]
+            main_tf = current_tf_val
+            if main_tf not in results_tf: 
+                 if results_tf: 
+                     main_tf = list(results_tf.keys())[0]
+                 else:
+                     continue
             
             main_data = results_tf[main_tf]
             price = main_data['price']
 
             daily_info = results_tf.get('1 day')
-            ma200_info = None
-            if daily_info and daily_info.get('candles'):
+            
+            # MA200 info už môžeme mať z filtra, ak nie, skúsime dopočítať
+            if not ma200_info and daily_info and daily_info.get('candles'):
                 ma200_info = calculate_ma200_metrics(daily_info['candles'])
 
             ma200_value = ma200_info.get('value') if ma200_info else None
@@ -864,15 +1132,22 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             elif align_short_long: tag = "align_long_s"
             elif align_short_short: tag = "align_short_s"
 
-            # Výpočet Pivotov (z denného grafu)
-            pivots = None
+            # Výpočet Pivotov (z denného grafu ak ešte nemáme)
             p_dist_str = ""
             is_near_support = False
             
-            if '1 day' in results_tf and len(results_tf['1 day']['candles']) >= 2:
-                # candles[-1] je dnes, candles[-2] je včera (uzavretý deň)
+            if not pivots and '1 day' in results_tf and len(results_tf['1 day']['candles']) >= 2:
+                # Ak sme predtým nerobili extra fetch (napr. pre 4H graf stačia denné pivoty)
+                # Tak ich vypočítame tu z načítaných denných dát
                 pivots = calculate_pivots(results_tf['1 day']['candles'][-2])
+            
+            if pivots and '1 day' in results_tf and len(results_tf['1 day']['candles']) >= 2:
+                # candles[-1] je dnes, candles[-2] je včera (uzavretý deň)
+                # Tento blok bol pôvodne len na výpočet, teraz je to pokryté vyššie, 
+                # ale nechávame logiku pre istotu, ak by pivots prišli z extra fetchu.
+                pass 
                 
+            if pivots:
                 # Vzdialenosť k najbližšiemu Supportu/Pivotu
                 price = main_data['price']
                 targets = {'P': pivots['P'], 'S1': pivots['S1'], 'S2': pivots['S2']}
@@ -885,7 +1160,8 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                         min_dist_pct = dist_pct
                         best_level = name
                 
-                p_dist_str = f"{best_level[0]} ({min_dist_pct:+.2f}%)" if best_level else "—"
+                best_val = targets[best_level]
+                p_dist_str = f"{best_level[0]} {best_val:.2f}/{min_dist_pct:+.2f}%" if best_level else "—"
                 if abs(min_dist_pct) < 0.5: # Ak sme bližšie než 0.5% k hladine
                     is_near_support = best_level in ('S1', 'S2', 'P')
 
@@ -1041,6 +1317,50 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 status = "🔥 PREPREDANÉ"
             elif is_overbought:
                 status = "❄️ PREKÚPENÉ"
+            else:
+                status = "Neutral"
+
+            main_candles = main_data.get('candles')
+            atr_value = calculate_atr(main_candles) if main_candles else None
+
+            summary = {
+                'symbol': sym,
+                'price': price,
+                'score_pct': score_pct,
+                'score_level': score_level,
+                'score_dist': score_dist,
+                'zone': zone,
+                'action': action,
+                'status': status,
+                'trend_text': trend_text,
+                'trend_label': trend_label,
+                'trend_breakout': trend_breakout,
+                'has_ma': has_ma,
+                'ma200_value': ma200_value,
+                'pct_b': main_bb.get('pct_b') if main_bb else None,
+                'pivot_label': pivot_bb_text,
+                'pivots': pivots,
+                'main_bb': main_bb,
+                'macd': main_macd,
+                'atr': atr_value,
+                'rsi': main_data['rsi'],
+                'rvi': main_data['rvi'],
+                'rvi_s': main_data['rvi_s'],
+                'breakdown': breakdown_text,
+                'next_update': next_update_text,
+                'zone_tag': zone_tag,
+                'timeframe': main_tf
+            }
+
+            strategy_label, strategy_reason = recommend_strategy(summary)
+            summary['strategy_label'] = strategy_label
+            summary['strategy_reason'] = strategy_reason
+            opt_label, opt_reason = recommend_option_strategy(summary)
+            summary['option_strategy'] = opt_label
+            summary['option_reason'] = opt_reason
+            ml_prob = predict_ml_score(summary, getattr(state, 'hunter_model', None))
+            summary['ml_prob'] = ml_prob
+            state.hunter_symbol_summaries[sym] = summary
 
             def update_ui(s=sym, p=price, res_tf=results_tf, st=status, ac=action, tg=tag,
                           pct_b_cell=pct_b_text, pivot_bb=pivot_bb_text, sc_text=score_text,
@@ -1052,7 +1372,8 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                           main_bb_param=main_bb, macd_param=main_macd,
                           score_level_val=score_level, score_dist_val=score_dist,
                           has_ma_param=has_ma, ma200_value_param=ma200_value,
-                          pct_b_value_param=pct_b_value, trend_breakout_flag=trend_breakout):
+                          pct_b_value_param=pct_b_value, trend_breakout_flag=trend_breakout,
+                          curr_summary=summary):
                 # Nájsť rodičovský riadok
                 parent_id = None
                 for item in tree.get_children():
@@ -1061,7 +1382,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                         break
                 
                 # Zobrazenie skóre v stĺpci RSI rodiča (upravíme Treeview neskôr)
-                ml_prob = summary.get('ml_prob') if 'summary' in locals() else None
+                ml_prob = curr_summary.get('ml_prob')
                 ml_text = f"{ml_prob*100:.0f}%" if isinstance(ml_prob, (int, float)) else "—"
                 vals = (
                     f"{p:.2f}",
@@ -1107,7 +1428,8 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 for tf_name in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]:
                     if tf_name in res_tf:
                         d = res_tf[tf_name]
-                        if tf_name in ('1 day', '1 week'):
+                        # Zobraziť TF vždy, ak je to hlavný TF, inak rešpektovať checkboxy (pre 1d/1w)
+                        if tf_name in ('1 day', '1 week') and tf_name != current_tf_val:
                             tf_checkbox = state.hunter_tf_vars.get(tf_name) if hasattr(state, 'hunter_tf_vars') else None
                             if tf_checkbox and not tf_checkbox.get():
                                 continue
@@ -1148,42 +1470,6 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                                         ""
                                     ),
                                     tags=tuple(child_tags))
-                summary = {
-                    'symbol': s,
-                    'price': p,
-                    'score_pct': score_pct_val,
-                    'score_level': score_level_val,
-                    'score_dist': score_dist_val,
-                    'zone': zone_name,
-                    'action': ac,
-                    'status': st,
-                    'trend_text': trend_val,
-                    'trend_label': trend_label_val,
-                    'trend_breakout': trend_breakout_flag,
-                    'has_ma': has_ma_param,
-                    'ma200_value': ma200_value_param,
-                    'pct_b': pct_b_value_param,
-                    'pivot_label': pivot_bb,
-                    'pivots': pivots_param,
-                    'main_bb': main_bb_param,
-                    'macd': macd_param,
-                    'rsi': main_data_param['rsi'],
-                    'rvi': main_data_param['rvi'],
-                    'rvi_s': main_data_param['rvi_s'],
-                    'breakdown': bk_text,
-                    'next_update': next_up,
-                    'zone_tag': z_tag,
-                    'timeframe': main_tf
-                }
-                strategy_label, strategy_reason = recommend_strategy(summary)
-                summary['strategy_label'] = strategy_label
-                summary['strategy_reason'] = strategy_reason
-                opt_label, opt_reason = recommend_option_strategy(summary)
-                summary['option_strategy'] = opt_label
-                summary['option_reason'] = opt_reason
-                ml_prob = predict_ml_score(summary, getattr(state, 'hunter_model', None))
-                summary['ml_prob'] = ml_prob
-                state.hunter_symbol_summaries[s] = summary
 
             if filter_threshold <= 0 or score_pct >= filter_threshold:
                 state.root.after(0, update_ui)
@@ -1250,8 +1536,12 @@ def update_hunter_symbols_ui(state, frame):
             state.hunter_selected_symbols[sym] = tk.BooleanVar(value=val)
         
         # Checkbox pre aktiváciu skenu
+        def on_toggle():
+            state.save_settings_file() # Uložiť stav checkboxu
+            refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)
+
         cb = ttk.Checkbutton(s_container, text=sym, variable=state.hunter_selected_symbols[sym],
-                             command=lambda: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v))
+                             command=on_toggle)
         cb.pack(side='left')
 
         # Tlačidlo na vymazanie (len pre vlastné tickery)
@@ -1362,7 +1652,10 @@ def create_swing_hunter_tab(parent, state):
     
     # Výber časových rámcov (multi-select by bol fajn, ale zatiaľ skúsime fixné sady alebo prepínač)
     ttk.Label(ctrl, text="Základný TF:").pack(side='left', padx=(15, 5))
-    tf_v = tk.StringVar(value="4 hours"); ttk.Combobox(ctrl, textvariable=tf_v, values=["15 mins", "1 hour", "4 hours", "1 day", "1 week"], width=10).pack(side='left', padx=5)
+    tf_v = tk.StringVar(value="4 hours")
+    tf_combo = ttk.Combobox(ctrl, textvariable=tf_v, values=["15 mins", "1 hour", "4 hours", "1 day", "1 week"], width=10)
+    tf_combo.pack(side='left', padx=5)
+    tf_combo.bind("<<ComboboxSelected>>", lambda e: refresh_hunter(state, state.hunter_tree, rsi_p, rvi_p, tf_v))
     
     tf_opts_frame = ttk.Frame(ctrl)
     tf_opts_frame.pack(fill='x', pady=(10, 0))
@@ -1688,6 +1981,12 @@ def create_swing_hunter_tab(parent, state):
         label = "📌 Pin" if sym not in pinned else "📍 Unpin"
         menu = tk.Menu(tree, tearoff=0)
         menu.add_command(label=label, command=lambda sym=sym: toggle_pin_symbol(sym))
+        
+        def open_tp_from_menu():
+            summary = state.hunter_symbol_summaries.get(sym, {'symbol': sym})
+            open_trade_plan_window(state, summary)
+            
+        menu.add_command(label="📝 Trade Plan", command=open_tp_from_menu)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1695,7 +1994,17 @@ def create_swing_hunter_tab(parent, state):
 
     tree.bind("<Button-3>", show_pin_menu)
     ttk.Button(highlight_frame, text="📋 Výťah", command=open_extract_window).pack(padx=2, pady=2)
-    ttk.Button(highlight_frame, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", command=lambda: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v, force=True)).pack(padx=2, pady=2)
+    
+    # NOVÉ: Skupina tlačidiel pre ovládanie skenu
+    scan_ctrl_frame = ttk.Frame(highlight_frame)
+    scan_ctrl_frame.pack(padx=2, pady=2)
+    
+    ttk.Button(scan_ctrl_frame, text="🏹 VYHĽADAŤ", width=12,
+               command=lambda: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v, force=True)).pack(side='left', padx=1)
+    
+    ttk.Button(scan_ctrl_frame, text="⏹️ STOP", width=10,
+               command=lambda: stop_hunter(state)).pack(side='left', padx=1)
+
     state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v = tree, rsi_p, rvi_p, tf_v
     def _force_refresh(event):
         item = tree.identify_row(event.y)
@@ -1712,29 +2021,111 @@ def create_swing_hunter_tab(parent, state):
     
     footer = ttk.Frame(frame)
     footer.pack(fill='x')
-    ttk.Button(footer, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", command=lambda: refresh_hunter(state, tree, rsi_p, rvi_p, tf_v, force=True)).pack(pady=10)
+    
+    f_ctrl_frame = ttk.Frame(footer)
+    f_ctrl_frame.pack(pady=10)
+    
+    ttk.Button(f_ctrl_frame, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", 
+               command=lambda: refresh_hunter(state, tree, rsi_p, rvi_p, tf_v, force=True)).pack(side='left', padx=2)
+    ttk.Button(f_ctrl_frame, text="⏹️ ZASTAVIŤ SKEN", 
+               command=lambda: stop_hunter(state)).pack(side='left', padx=2)
+    
     return frame
 
 
-def refresh_trade_plan_vars(window, symbol, summary):
+def refresh_trade_plan_vars(state, window, symbol, summary):
     plan_vars = getattr(window, 'plan_vars', None)
     if not plan_vars:
         return
     data = summary or {}
 
     def _fmt(val):
-        return f"{val:.2f}" if isinstance(val, (int, float)) else ("—" if val is None else str(val))
+        try:
+            if val is None or val == "—": return "—"
+            return f"{float(val):.2f}"
+        except (ValueError, TypeError):
+            return str(val) if val is not None else "—"
 
     entry = data.get('price')
     pivots = data.get('pivots') or {}
     bb = data.get('main_bb') or {}
-    sl = pivots.get('S1') or pivots.get('S2') or (entry * 0.985 if entry else None)
-    tp1 = pivots.get('P') or bb.get('mid') or entry
-    tp2 = bb.get('upper')
-    rr_val = None
-    if entry and sl and tp1 and entry != sl:
-        rr_val = (tp1 - entry) / abs(entry - sl)
+    atr_value = data.get('atr')
+    
+    def _to_float(value):
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
+    entry_value = _to_float(entry)
+    
+    # 1. SL calculation (2xATR or pivot fallback)
+    sl = None
+    atr_mult = 2.0
+    atr_mult_var = getattr(state, 'atr_multiplier_var', None)
+    if atr_mult_var:
+        try:
+            atr_mult = float(atr_mult_var.get())
+        except Exception:
+            atr_mult = 2.0
+
+    if entry_value is not None:
+        if atr_value is not None:
+            # Prefer ATR-based SL
+            sl = entry_value - (atr_value * atr_mult)
+        else:
+            # Fallback to pivots
+            supports = []
+            for k in ('S1', 'S2', 'S3', 'P'):
+                v = _to_float(pivots.get(k))
+                if v is not None and v < entry_value:
+                    supports.append(v)
+            if supports:
+                sl = max(supports)
+            else:
+                sl = entry_value * 0.985 # 1.5% stop
+    
+    # 2. TP1 and TP2 calculation
+    tp1 = None
+    tp2 = None
+    if entry_value is not None:
+        # Find closest pivot ABOVE entry
+        resistances = []
+        for k in ('P', 'R1', 'R2', 'R3'):
+            v = _to_float(pivots.get(k))
+            if v is not None and v > entry_value:
+                resistances.append(v)
+        resistances.sort()
+        
+        if resistances:
+            tp1 = resistances[0]
+            if len(resistances) > 1:
+                tp2 = resistances[1]
+        
+        # Fallback for TP1 if no pivots above
+        if tp1 is None:
+            bb_mid = _to_float(bb.get('mid'))
+            if bb_mid and bb_mid > entry_value:
+                tp1 = bb_mid
+            else:
+                tp1 = entry_value * 1.015 # 1.5% target
+        
+        # Fallback for TP2
+        if tp2 is None:
+            bb_upper = _to_float(bb.get('upper'))
+            if bb_upper and bb_upper > (tp1 or entry_value):
+                tp2 = bb_upper
+            else:
+                tp2 = (tp1 or entry_value) * 1.02 # Another 2% above TP1
+                
+    # 3. R:R calculation
+    rr_val = None
+    if entry_value and sl and tp1 and entry_value != sl:
+        rr_val = (tp1 - entry_value) / abs(entry_value - sl)
+
+    # 4. Set variables
     plan_vars['entry'].set(_fmt(entry))
     plan_vars['sl'].set(_fmt(sl))
     plan_vars['tp1'].set(_fmt(tp1))
@@ -1745,12 +2136,448 @@ def refresh_trade_plan_vars(window, symbol, summary):
     plan_vars['reason'].set(data.get('strategy_reason', '—'))
     plan_vars['option_strategy'].set(data.get('option_strategy', '—'))
     plan_vars['option_reason'].set(data.get('option_reason', data.get('strategy_reason', '—')))
+    
     ml_prob = data.get('ml_prob')
     if ml_prob is not None:
         plan_vars['ml_prob'].set(f"{ml_prob*100:.0f}%")
     else:
         plan_vars['ml_prob'].set("—")
 
+
+def open_tws_execution_window(state, symbol, plan_vars, summary):
+    """Okno pre odoslanie objednávky do TWS na základe trade plánu s podporou Combo."""
+    window = tk.Toplevel(state.root)
+    window.title(f"Odoslať do TWS - {symbol}")
+    window.geometry("520x680")
+    window.transient(state.root)
+
+    # --- PREMENNÉ ---
+    order_type_var = tk.StringVar(value="OPTION")
+    combo_mode_var = tk.StringVar(value="SINGLE") # SINGLE, SPREAD, ROLL
+    
+    action_raw = plan_vars['action'].get().upper()
+    default_action = "BUY"
+    if any(x in action_raw for x in ("SELL", "SHORT", "VÝSTUP", "BEAR")):
+        default_action = "SELL"
+    
+    # Leg 1
+    l1_action = tk.StringVar(value=default_action)
+    l1_qty = tk.StringVar(value="1")
+    l1_right = tk.StringVar(value="PUT" if default_action == "BUY" else "CALL")
+    l1_expiry = tk.StringVar()
+    l1_strike = tk.StringVar()
+    l1_greeks = tk.StringVar(value="Cena: — | Δ: — | Θ: —")
+    
+    # Leg 2
+    l2_action = tk.StringVar(value="SELL" if default_action == "BUY" else "BUY")
+    l2_qty = tk.StringVar(value="1")
+    l2_right = tk.StringVar(value="PUT" if default_action == "BUY" else "CALL")
+    l2_expiry = tk.StringVar()
+    l2_strike = tk.StringVar()
+    l2_greeks = tk.StringVar(value="Cena: — | Δ: — | Θ: —")
+    
+    net_price_var = tk.StringVar(value="0.00")
+    
+    strategy_desc_var = tk.StringVar(value="SINGLE OPTION")
+
+    # --- UI ---
+    main_frame = ttk.Frame(window, padding=15)
+    main_frame.pack(fill='both', expand=True)
+
+    header_frame = ttk.Frame(main_frame)
+    header_frame.pack(fill='x', pady=(0, 10))
+    ttk.Label(header_frame, text=f"Symbol: {symbol}", font=('Arial', 11, 'bold')).pack(side='left')
+    
+    strat_lbl = tk.Label(header_frame, textvariable=strategy_desc_var, font=('Arial', 10, 'bold'), 
+                         relief='ridge', padx=10, pady=2)
+    strat_lbl.pack(side='right')
+
+    def update_strat_desc(*a):
+        m = combo_mode_var.get()
+        t = order_type_var.get()
+        if t == "STOCK":
+            strategy_desc_var.set("STOCK ORDER")
+            strat_lbl.config(fg="black", bg="#f0f0f0")
+            return
+        
+        if m == "SINGLE":
+            desc = f"LONG {l1_right.get()}" if l1_action.get() == "BUY" else f"SHORT {l1_right.get()}"
+            strategy_desc_var.set(desc)
+            strat_lbl.config(fg="#2c3e50", bg="#ecf0f1")
+            return
+
+        if m == "PMCC":
+            strategy_desc_var.set("POOR MAN'S COVERED CALL")
+            strat_lbl.config(fg="#2e7d32", bg="#e8f5e9")
+            return
+
+        act1, act2 = l1_action.get(), l2_action.get()
+        str1, str2 = 0.0, 0.0
+        try: 
+            str1 = float(l1_strike.get() or 0)
+            str2 = float(l2_strike.get() or 0)
+        except: pass
+        exp1, exp2 = l1_expiry.get(), l2_expiry.get()
+        rig1, rig2 = l1_right.get(), l2_right.get()
+
+        desc = "CUSTOM COMBO"
+        color = "#2980b9"; bg = "#e1f5fe"
+
+        if exp1 == exp2 and rig1 == rig2:
+            if rig1 == "PUT":
+                if act1 == "SELL" and act2 == "BUY" and str1 > str2: desc = "BULL PUT SPREAD"; color = "#2e7d32"; bg = "#e8f5e9"
+                elif act1 == "BUY" and act2 == "SELL" and str1 < str2: desc = "BULL PUT SPREAD"; color = "#2e7d32"; bg = "#e8f5e9"
+                else: desc = "BEAR PUT SPREAD"; color = "#c62828"; bg = "#ffebee"
+            else: # CALL
+                if act1 == "BUY" and act2 == "SELL" and str1 < str2: desc = "BULL CALL SPREAD"; color = "#2e7d32"; bg = "#e8f5e9"
+                elif act1 == "SELL" and act2 == "BUY" and str1 > str2: desc = "BULL CALL SPREAD"; color = "#2e7d32"; bg = "#e8f5e9"
+                else: desc = "BEAR CALL SPREAD"; color = "#c62828"; bg = "#ffebee"
+        elif exp1 != exp2 and rig1 == rig2:
+            desc = "CALENDAR SPREAD" if str1 == str2 else "DIAGONAL SPREAD"
+            color = "#673ab7"; bg = "#f3e5f5"
+        elif exp1 == exp2 and rig1 != rig2:
+            desc = "STRADDLE" if str1 == str2 else "STRANGLE"
+            color = "#ff9800"; bg = "#fff3e0"
+
+        if exp1 and exp2 and exp1 < exp2 and act1 == "SELL" and act2 == "BUY":
+            desc = f"ROLL OUT ({desc})"
+
+        strategy_desc_var.set(desc)
+        strat_lbl.config(fg=color, bg=bg)
+
+    # Typ aktíva
+    type_frame = ttk.Frame(main_frame)
+    type_frame.pack(fill='x', pady=5)
+    ttk.Radiobutton(type_frame, text="Akcie (STK)", variable=order_type_var, value="STOCK").pack(side='left', padx=10)
+    ttk.Radiobutton(type_frame, text="Opcia (OPT)", variable=order_type_var, value="OPTION").pack(side='left', padx=10)
+
+    # Combo Mode (len pre OPT)
+    combo_frame = ttk.LabelFrame(main_frame, text="Režim stratégie (len pre opcie)", padding=5)
+    combo_frame.pack(fill='x', pady=5)
+    modes = [("Single Leg", "SINGLE"), ("Vertical Spread", "SPREAD"), ("Roll / Custom", "ROLL"), ("PMCC", "PMCC")]
+    for text, val in modes:
+        ttk.Radiobutton(combo_frame, text=text, variable=combo_mode_var, value=val).pack(side='left', padx=5)
+
+    # Spoločné parametre
+    params_frame = ttk.LabelFrame(main_frame, text="Základné parametre", padding=10)
+    params_frame.pack(fill='x', pady=5)
+    
+    ttk.Label(params_frame, text="Net Limit Cena:").grid(row=0, column=0, sticky='w')
+    ttk.Entry(params_frame, textvariable=net_price_var, width=12).grid(row=0, column=1, sticky='w', padx=5)
+    ttk.Label(params_frame, text="(Debet/Kredit)", font=('Arial', 8, 'italic')).grid(row=0, column=2, sticky='w')
+
+    # LEGS container
+    legs_canvas = tk.Canvas(main_frame, highlightthickness=0)
+    legs_canvas.pack(fill='both', expand=True)
+    legs_frame = ttk.Frame(legs_canvas)
+    legs_canvas.create_window((0,0), window=legs_frame, anchor='nw')
+
+    def build_leg_ui(parent, title, act_v, qty_v, rig_v, exp_v, str_v, grk_v):
+        f = ttk.LabelFrame(parent, text=title, padding=10)
+        f.pack(fill='x', pady=5)
+        
+        # Row 0: Action, Qty, Greeks
+        row0 = ttk.Frame(f)
+        row0.grid(row=0, column=0, columnspan=4, sticky='w')
+        ttk.Label(row0, text="Akcia:").pack(side='left')
+        ttk.Combobox(row0, textvariable=act_v, values=["BUY", "SELL"], width=7, state='readonly').pack(side='left', padx=5)
+        ttk.Label(row0, text="Množstvo:").pack(side='left', padx=(10,0))
+        ttk.Entry(row0, textvariable=qty_v, width=5).pack(side='left', padx=5)
+        ttk.Label(row0, textvariable=grk_v, font=('Courier', 9, 'bold'), foreground='#2e7d32').pack(side='left', padx=(20,0))
+        
+        # Row 1: Type, Strike
+        ttk.Label(f, text="Typ:").grid(row=1, column=0, sticky='w', pady=5)
+        ttk.Combobox(f, textvariable=rig_v, values=["CALL", "PUT"], width=7, state='readonly').grid(row=1, column=1, padx=5, sticky='w')
+        
+        ttk.Label(f, text="Strike:").grid(row=1, column=2, sticky='w', padx=(10,0))
+        s_combo = ttk.Combobox(f, textvariable=str_v, width=10)
+        s_combo.grid(row=1, column=3, padx=5, sticky='w')
+        
+        # Row 2: Expiry
+        ttk.Label(f, text="Expirácia:").grid(row=2, column=0, sticky='w')
+        e_combo = ttk.Combobox(f, textvariable=exp_v, width=15)
+        e_combo.grid(row=2, column=1, columnspan=2, padx=5, sticky='w')
+        
+        def load_strikes(*a):
+            p = state.port_var.get()
+            ex = exp_v.get()
+            ri = rig_v.get()
+            if not ex: return
+            def _run_s():
+                try:
+                    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_strikes.py')
+                    res = subprocess.run([sys.executable, script, p, symbol, ex, ri], capture_output=True, text=True, timeout=30)
+                    if res.returncode == 0:
+                        data = json.loads(res.stdout)
+                        if data.get('success'):
+                            stks = [str(s) for s in data['strikes']]
+                            window.after(0, lambda: s_combo.config(values=stks))
+                except: pass
+            threading.Thread(target=_run_s, daemon=True).start()
+
+        def load_greeks(*a):
+            p = state.port_var.get()
+            ex = exp_v.get()
+            ri = rig_v.get()[0] # C or P
+            sk = str_v.get()
+            if not ex or not sk: return
+            grk_v.set("Cena: ... | Δ: ... | Θ: ...")
+            def _run_g():
+                try:
+                    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_option.py')
+                    res = subprocess.run([sys.executable, script, p, symbol, ex, sk, ri], capture_output=True, text=True, timeout=30)
+                    if res.returncode == 0:
+                        data = json.loads(res.stdout)
+                        pr = data.get('price', 0)
+                        d = data.get('delta', 0)
+                        t = data.get('theta', 0)
+                        window.after(0, lambda: grk_v.set(f"Cena: {pr:.2f} | Δ: {d:+.2f} | Θ: {t:+.2f}"))
+                except: pass
+            threading.Thread(target=_run_g, daemon=True).start()
+
+        exp_v.trace_add('write', load_strikes)
+        exp_v.trace_add('write', update_strat_desc)
+        str_v.trace_add('write', load_greeks)
+        str_v.trace_add('write', update_strat_desc)
+        rig_v.trace_add('write', load_strikes)
+        rig_v.trace_add('write', update_strat_desc)
+        act_v.trace_add('write', update_strat_desc)
+
+        def load_exps():
+            p = state.port_var.get()
+            r = 'C' if rig_v.get() == "CALL" else 'P'
+            def _run():
+                try:
+                    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_load_expiries.py')
+                    res = subprocess.run([sys.executable, script, p, symbol, r], capture_output=True, text=True, timeout=30)
+                    if res.returncode == 0 and res.stdout.strip():
+                        exs = res.stdout.strip().split(',')
+                        window.after(0, lambda: e_combo.config(values=exs))
+                        if exs and not exp_v.get(): window.after(0, lambda: exp_v.set(exs[0]))
+                except: pass
+            threading.Thread(target=_run, daemon=True).start()
+            
+        ttk.Button(f, text="🔄", width=3, command=load_exps).grid(row=2, column=3, padx=5)
+        return f
+
+    f_l1 = build_leg_ui(legs_frame, "Leg 1 (Hlavná)", l1_action, l1_qty, l1_right, l1_expiry, l1_strike, l1_greeks)
+    f_l2 = build_leg_ui(legs_frame, "Leg 2 (Combo)", l2_action, l2_qty, l2_right, l2_expiry, l2_strike, l2_greeks)
+
+    def refresh_visibility(*a):
+        m = combo_mode_var.get()
+        t = order_type_var.get()
+        if t == "STOCK":
+            combo_frame.pack_forget()
+            f_l2.pack_forget()
+            f_l1.config(text="Parametre Akcie")
+            # Skryť opčné polia v Leg 1
+            for slave in f_l1.grid_slaves():
+                info = slave.grid_info()
+                if info.get('row') in (1, 2): slave.grid_remove()
+        else:
+            combo_frame.pack(fill='x', pady=5, before=params_frame)
+            f_l1.config(text="Leg 1")
+            for slave in f_l1.grid_slaves(): slave.grid_item()
+            if m == "SINGLE":
+                f_l2.pack_forget()
+            else:
+                f_l2.pack(fill='x', pady=5)
+                if m == "SPREAD":
+                    l2_expiry.set(l1_expiry.get()) # Spread máva rovnakú expiráciu
+                    l2_right.set(l1_right.get())
+                    l2_action.set("SELL" if l1_action.get()=="BUY" else "BUY")
+                elif m == "PMCC":
+                    # PMCC: Leg 1 je Long (vzdialený), Leg 2 je Short (blízky)
+                    l1_action.set("BUY")
+                    l2_action.set("SELL")
+                    l1_right.set("CALL")
+                    l2_right.set("CALL")
+
+    order_type_var.trace_add('write', refresh_visibility)
+    order_type_var.trace_add('write', update_strat_desc)
+    combo_mode_var.trace_add('write', refresh_visibility)
+    combo_mode_var.trace_add('write', update_strat_desc)
+    l1_expiry.trace_add('write', lambda *a: l2_expiry.set(l1_expiry.get()) if combo_mode_var.get()=="SPREAD" else None)
+
+    status_var = tk.StringVar(value="Pripravený")
+    ttk.Label(main_frame, textvariable=status_var, font=('Arial', 8, 'italic'), foreground='blue').pack(pady=5)
+
+    def execute_order():
+        if not state.connected:
+            messagebox.showerror("TWS", "Nie ste pripojený k TWS!")
+            return
+        
+        status_var.set("Odosielam do TWS...")
+        btn_exec.config(state='disabled')
+        
+        def _run_exec():
+            try:
+                root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                port = state.port_var.get()
+                
+                if order_type_var.get() == "STOCK":
+                    script = os.path.join(root_dir, 'scripts', 'tws_rebalance_stock.py')
+                    q = int(l1_qty.get())
+                    if l1_action.get() == "SELL": q = -q
+                    cmd = [sys.executable, script, '--symbol', symbol, '--quantity', str(q), '--port', port]
+                    try:
+                        p = float(net_price_var.get())
+                        if p > 0: cmd += ['--price', str(p)]
+                    except: pass
+                else:
+                    script = os.path.join(root_dir, 'scripts', 'tws_place_order.py')
+                    cmd = [sys.executable, script, '--symbol', symbol, '--qty', l1_qty.get(), '--port', port, '--action', l1_action.get()]
+                    cmd += ['--expiry', l1_expiry.get()]
+                    if l1_right.get() == "CALL": cmd += ['--call-strike', l1_strike.get()]
+                    else: cmd += ['--put-strike', l1_strike.get()]
+                    
+                    if combo_mode_var.get() != "SINGLE":
+                        if l2_right.get() == "CALL": cmd += ['--call-strike-2', l2_strike.get()]
+                        else: cmd += ['--put-strike-2', l2_strike.get()]
+                        if l2_expiry.get() != l1_expiry.get(): cmd += ['--expiry-2', l2_expiry.get()]
+                        cmd += ['--action-2', l2_action.get()]
+                    
+                    # Vždy poslať zadanú limit cenu
+                    try:
+                        p_val = float(net_price_var.get())
+                        cmd += ['--price', str(p_val)]
+                    except: pass
+
+                if port != "7497": cmd.append('--live')
+                
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+                out = json.loads(res.stdout) if res.stdout else {}
+                if out.get('success'):
+                    window.after(0, lambda: [status_var.set("✅ Úspech"), messagebox.showinfo("TWS", out.get('msg', 'Odoslané'))])
+                else:
+                    window.after(0, lambda: [status_var.set("❌ Chyba"), messagebox.showerror("TWS", out.get('error', 'Chyba'))])
+            except Exception as e:
+                window.after(0, lambda: messagebox.showerror("TWS", str(e)))
+            finally:
+                window.after(0, lambda: btn_exec.config(state='normal'))
+
+        threading.Thread(target=_run_exec, daemon=True).start()
+
+    btn_exec = ttk.Button(main_frame, text="🚀 ODOSLAŤ OBJEDNÁVKU", command=execute_order)
+    btn_exec.pack(pady=10, fill='x')
+    ttk.Button(main_frame, text="Zavrieť", command=window.destroy).pack()
+
+    # Ak máme PMCC dáta v summary, predvyplníme
+    pmcc = summary.get('pmcc')
+    if pmcc:
+        order_type_var.set("OPTION")
+        combo_mode_var.set("PMCC")
+        l1_action.set("BUY")
+        l1_expiry.set(pmcc['leaps_data']['expiry'])
+        l1_strike.set(str(pmcc['leaps_data']['strike']))
+        l1_right.set("CALL")
+        
+        l2_action.set("SELL")
+        l2_expiry.set(pmcc['short_data']['expiry'])
+        l2_strike.set(str(pmcc['short_data']['strike']))
+        l2_right.set("CALL")
+        
+        net_price_var.set(pmcc['debit'])
+
+    refresh_visibility()
+
+
+def load_cached_candles(symbol, timeframe="1 day"):
+    """Načíta sviečky z cache pre potreby grafu."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cache_dir = os.path.join(root, 'cache', 'history')
+    filename = f"{symbol}_{timeframe.replace(' ', '_')}.json"
+    path = os.path.join(cache_dir, filename)
+    
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('candles', [])
+    except Exception:
+        return []
+
+def open_chart_window(state, symbol, summary):
+    """Otvorí okno s grafom a pivotmi."""
+    if not MATPLOTLIB_AVAILABLE:
+        messagebox.showerror("Graf", "Knižnica matplotlib nie je dostupná. Nainštalujte ju pomocou:\npip install matplotlib")
+        return
+
+    # Načítanie dát (denné pre pivoty + aktuálne pre detail)
+    daily_candles = load_cached_candles(symbol, "1 day")
+    current_tf = getattr(state, 'hunter_tf_v', tk.StringVar(value="4 hours")).get()
+    detail_candles = load_cached_candles(symbol, current_tf)
+
+    if not daily_candles and not detail_candles:
+        messagebox.showwarning("Graf", f"Žiadne historické dáta pre {symbol} v cache.\nSkúste najprv 'VYHĽADAŤ PRÍLEŽITOSTI'.")
+        return
+
+    # Ak nemáme detailné, použijeme aspoň denné
+    candles = detail_candles if detail_candles else daily_candles
+    if len(candles) < 2:
+        messagebox.showwarning("Graf", "Nedostatok dát pre vykreslenie grafu.")
+        return
+
+    # Pivoty (vždy z denného grafu)
+    pivots = summary.get('pivots')
+    if not pivots and daily_candles:
+        # Skúsime vypočítať z predposlednej dennej sviečky
+        if len(daily_candles) >= 2:
+            pivots = calculate_pivots(daily_candles[-2])
+
+    win = tk.Toplevel(state.root)
+    win.title(f"Graf {symbol} ({current_tf})")
+    win.geometry("800x600")
+
+    fig = Figure(figsize=(8, 6), dpi=100)
+    ax = fig.add_subplot(111)
+
+    # Príprava dát pre sviečky
+    import numpy as np
+    
+    # Zoberieme posledných 40 sviečok pre prehľadnosť
+    plot_candles = candles[-40:]
+    prices = [c['close'] for c in plot_candles]
+    highs = [c['high'] for c in plot_candles]
+    lows = [c['low'] for c in plot_candles]
+    opens = [c['open'] for c in plot_candles]
+    x = np.arange(len(plot_candles))
+
+    # Vykreslenie tieňov a tiel sviečok
+    for i in range(len(plot_candles)):
+        color = 'green' if prices[i] >= opens[i] else 'red'
+        ax.plot([i, i], [lows[i], highs[i]], color=color, linewidth=1)
+        ax.add_patch(patches.Rectangle((i - 0.3, min(opens[i], prices[i])), 0.6, abs(opens[i] - prices[i]), color=color))
+
+    # Vykreslenie hladín (Pivots)
+    if pivots:
+        colors = {'P': 'blue', 'S1': 'orange', 'S2': 'red', 'R1': 'orange', 'R2': 'red'}
+        for name, val in pivots.items():
+            if val and name in colors:
+                ax.axhline(y=val, color=colors[name], linestyle='--', alpha=0.6, label=f"{name}: {val:.2f}")
+                ax.text(len(plot_candles)-1, val, f" {name}", color=colors[name], va='center', fontweight='bold')
+
+    # Aktuálna cena
+    curr_price = summary.get('price')
+    if curr_price:
+        ax.axhline(y=curr_price, color='black', linestyle=':', alpha=0.8)
+        ax.text(0, curr_price, f" Teraz: {curr_price:.2f}", color='black', va='bottom', fontsize=9, bbox=dict(facecolor='white', alpha=0.5))
+
+    ax.set_title(f"{symbol} - {current_tf} (Pivoty z denného TF)")
+    ax.grid(True, alpha=0.3)
+    ax.set_ylabel("Cena (USD)")
+    
+    # Odstránenie X osi (indexy nie sú dôležité)
+    ax.set_xticks([])
+
+    canvas = FigureCanvasTkAgg(fig, master=win)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill='both', expand=True)
+
+    # Legenda
+    if pivots:
+        ax.legend(loc='upper left', fontsize='small')
 
 def open_trade_plan_window(state, summary):
     symbol = summary.get('symbol')
@@ -1761,7 +2588,7 @@ def open_trade_plan_window(state, summary):
     if existing and existing.winfo_exists():
         existing.lift()
         existing.focus_force()
-        refresh_trade_plan_vars(existing, symbol, state.hunter_symbol_summaries.get(symbol, summary))
+        refresh_trade_plan_vars(state, existing, symbol, state.hunter_symbol_summaries.get(symbol, summary))
         return
 
     window = tk.Toplevel(state.root)
@@ -1810,10 +2637,16 @@ def open_trade_plan_window(state, summary):
 
     def refresh_plan():
         force_refresh_symbol_now(state, symbol)
-        state.root.after(1500, lambda: refresh_trade_plan_vars(window, symbol, state.hunter_symbol_summaries.get(symbol, summary)))
+        state.root.after(1500, lambda: refresh_trade_plan_vars(state, window, symbol, state.hunter_symbol_summaries.get(symbol, summary)))
 
+    def show_chart():
+        open_chart_window(state, symbol, summary)
+
+    ttk.Button(btn_frame, text="📊 Graf", command=show_chart).pack(side='left', padx=5)
     ttk.Button(btn_frame, text="🔄 Force refresh", command=refresh_plan).pack(side='left')
+    ttk.Button(btn_frame, text="📂 Uložené plány", command=lambda: open_saved_trade_plan_browser(state, plan_vars)).pack(side='left', padx=5)
     ttk.Button(btn_frame, text="💾 Uložiť plán", command=lambda: save_trade_plan_to_file(symbol, plan_vars)).pack(side='left', padx=5)
+    ttk.Button(btn_frame, text="🚀 Odoslať do TWS", command=lambda: open_tws_execution_window(state, symbol, plan_vars, summary)).pack(side='left', padx=5)
 
     def on_close():
         plan_windows.pop(symbol, None)
@@ -1822,4 +2655,4 @@ def open_trade_plan_window(state, summary):
     ttk.Button(btn_frame, text="Zavrieť", command=on_close).pack(side='right')
     window.protocol("WM_DELETE_WINDOW", on_close)
 
-    refresh_trade_plan_vars(window, symbol, state.hunter_symbol_summaries.get(symbol, summary))
+    refresh_trade_plan_vars(state, window, symbol, state.hunter_symbol_summaries.get(symbol, summary))

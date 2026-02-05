@@ -43,6 +43,7 @@ class SharedState:
              
         self.current_profile_var = tk.StringVar(value=default_profile)
         self.port_var = tk.StringVar(value="7497") # Bude prepísané podľa profilu
+        self.current_port = "7497" # Verzia pre background thready
         
         self.min_premium_var = tk.StringVar(value="0.70")
         self.short_expiry_var = tk.StringVar()
@@ -266,7 +267,9 @@ class SharedState:
     def update_port_from_profile(self):
         """Aktualizuje port_var podľa vybraného profilu"""
         profile = self.get_current_profile()
-        self.port_var.set(str(profile.get("port", 7497)))
+        new_port = str(profile.get("port", 7497))
+        self.port_var.set(new_port)
+        self.current_port = new_port
         
         # Ak sme v LIVE režime, aktualizuj vizuál (ak existuje)
         if hasattr(self, 'update_profile_indicator'):
@@ -380,7 +383,14 @@ class SharedState:
             was_connected = None
             alert_shown = False
             while True:
-                port = self.port_var.get()
+                try:
+                    # Kontrola či root ešte existuje (prevencia RuntimeError pri vypínaní)
+                    if not self.root or not self.root.winfo_exists():
+                        break
+                except:
+                    break
+                    
+                port = self.current_port
                 cmd = [sys.executable, script, str(port)]
                 connected = False
                 error_msg = ""
@@ -565,8 +575,8 @@ class SharedState:
         if self.conn_label:
             self.conn_label.config(text="Testujem...")
         
+        port = self.current_port
         def run():
-            port = self.port_var.get()
             try:
                 script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_check_connection.py')
                 result = subprocess.run(

@@ -1,0 +1,7 @@
+Timestamp,Symbol,Entry,SL,TP1,TP2,R_R,Action,Strategy,Reason,OptionStrategy,OptionReason
+2026-02-03T20:11:47.852781,NIO,4.45,4.40,4.50,4.84,1.00:1,🚀 STRONG BUY,Mean Reversion (Hunt),Low %B (RVI>Sig),Bull put spread,Mean reversion zóna (%B<30)
+2026-02-03T20:11:52.197221,NIO,4.45,4.40,4.50,4.84,1.00:1,🚀 STRONG BUY,Mean Reversion (Hunt),Low %B (RVI>Sig),Bull put spread,Mean reversion zóna (%B<30)
+2026-02-04T16:32:00.160276,ADBE,266.76,255.14,275.76,280.51,0.77:1,⏳ SLEDOVAŤ AKUMULÁCIU,Mean Reversion (Hunt),Low %B,Bull put spread,Mean reversion zóna (%B<30)
+2026-02-04T16:34:46.064916,OTEX,22.45,21.17,23.41,24.09,0.75:1,🚀 STRONG BUY,Mean Reversion (Hunt),Low %B (RVI>Sig),Bull put spread,Mean reversion zóna (%B<30)
+2026-02-04T16:41:48.858334,OTEX,22.45,21.17,23.41,24.09,0.75:1,🚀 STRONG BUY,Mean Reversion (Hunt),Low %B (RVI>Sig),Bull put spread,Mean reversion zóna (%B<30)
+2026-02-04T18:55:23.267241,CVX,182.08,176.71,184.81,188.51,0.51:1,⚠️ RIZIKO / BLOKUJ BUY,Risk/Exit,Vysoké %B,Zatvoriť/hedge,Vyšší %B/exit – covered call alebo collar

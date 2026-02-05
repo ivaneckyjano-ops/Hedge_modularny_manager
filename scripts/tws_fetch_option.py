@@ -82,6 +82,7 @@ def main():
             mid = 0
 
         theta = None
+        delta = None
         theta_source = 'none'
         mg_ticker = None
         try:
@@ -89,12 +90,17 @@ def main():
             for _ in range(60):  # o niečo dlhšie, aby prišla modelGreeks
                 ib.sleep(0.25)
                 greeks = getattr(mg_ticker, 'modelGreeks', None)
-                if greeks and getattr(greeks, 'theta', None) is not None:
-                    theta = greeks.theta
-                    theta_source = 'tws'
-                    break
+                if greeks:
+                    if getattr(greeks, 'theta', None) is not None:
+                        theta = greeks.theta
+                    if getattr(greeks, 'delta', None) is not None:
+                        delta = greeks.delta
+                    
+                    if theta is not None and delta is not None:
+                        theta_source = 'tws'
+                        break
         except Exception as e:
-            print(f"DEBUG: Theta fetch error: {e}", file=sys.stderr)
+            print(f"DEBUG: Greeks fetch error: {e}", file=sys.stderr)
             sys.stderr.flush()
         finally:
             if mg_ticker:
@@ -107,6 +113,7 @@ def main():
             payload = {
                 'price': round(mid, 2),
                 'theta': round(theta if theta is not None else 0.0, 4),
+                'delta': round(delta if delta is not None else 0.0, 4),
                 'thetaSource': theta_source
             }
             print(json.dumps(payload))

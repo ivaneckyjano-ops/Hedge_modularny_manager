@@ -3,6 +3,7 @@ import argparse
 import sys
 import json
 import os
+import random
 from pathlib import Path
 
 # Pridanie cesty k venv knižniciam
@@ -11,12 +12,13 @@ venv_site = BASE_DIR / 'venv' / 'lib' / 'python3.12' / 'site-packages'
 if venv_site.exists():
     sys.path.insert(0, str(venv_site))
 
-from ib_insync import IB, Stock, MarketOrder
+from ib_insync import IB, Stock, MarketOrder, LimitOrder
 
 def main():
     parser = argparse.ArgumentParser(description='Rebalance Delta using stocks (Automated)')
     parser.add_argument('--symbol', required=True)
     parser.add_argument('--quantity', type=int, required=True, help='Number of shares to trade (+ for BUY, - for SELL)')
+    parser.add_argument('--price', type=float, help='Limit price (if omitted, uses MarketOrder)')
     parser.add_argument('--port', type=int, default=7497)
     parser.add_argument('--live', action='store_true', help='Povoliť reálne obchody (vypne bezpečnostnú poistku)')
     
@@ -59,7 +61,11 @@ def main():
         action = 'BUY' if args.quantity > 0 else 'SELL'
         abs_qty = abs(args.quantity)
         
-        order = MarketOrder(action, abs_qty, outsideRth=True)
+        if args.price and args.price > 0:
+            order = LimitOrder(action, abs_qty, args.price, outsideRth=True)
+        else:
+            order = MarketOrder(action, abs_qty, outsideRth=True)
+        
         order.orderRef = 'HedgeManager'
         trade = ib.placeOrder(contract, order)
         

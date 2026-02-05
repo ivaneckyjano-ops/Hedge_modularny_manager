@@ -22,7 +22,12 @@ def main():
     parser.add_argument('--expiry', required=True)
     parser.add_argument('--call-strike', type=float, help='Strike for Call leg')
     parser.add_argument('--put-strike', type=float, help='Strike for Put leg')
+    parser.add_argument('--call-strike-2', type=float, help='Strike for second Call leg')
+    parser.add_argument('--put-strike-2', type=float, help='Strike for second Put leg')
+    parser.add_argument('--expiry-2', help='Expiry for second leg (optional, defaults to --expiry)')
+    parser.add_argument('--action-2', choices=['BUY', 'SELL'], help='Action for second leg')
     parser.add_argument('--action', choices=['BUY', 'SELL'], default='BUY', help='Action for the order')
+    parser.add_argument('--price', type=float, help='Limit price for the order')
     parser.add_argument('--qty', type=int, default=1, help='Quantity')
     parser.add_argument('--port', type=int, default=7497)
     parser.add_argument('--live', action='store_true', help='Enable real orders')
@@ -49,29 +54,65 @@ def main():
         ib.reqMarketDataType(3) 
         ib.reqMarketDataType(4)
         
+        # --- KONTROLA EXISTUJÚCICH OBJEDNÁVOK (Duplicita) ---
+        open_trades = ib.trades()
+        for t in open_trades:
+            if t.contract.symbol == args.symbol and not t.isDone():
+                # Ak ide o opciu, kontrolujeme aj strike a expiráciu
+                if t.contract.secType == 'OPT':
+                    t_strike = float(t.contract.strike)
+                    t_expiry = t.contract.lastTradeDateOrContractMonth
+                    t_right = t.contract.right
+                    
+                    match_call = (args.call_strike is not None and t_strike == args.call_strike and t_right == 'C')
+                    match_put = (args.put_strike is not None and t_strike == args.put_strike and t_right == 'P')
+                    
+                    if (match_call or match_put) and t_expiry == args.expiry.replace('-', '').replace('/', ''):
+                         print(json.dumps({
+                             'success': False, 
+                             'error': f'Objednávka pre {args.symbol} {t_right}{t_strike} už v TWS existuje (Status: {t.orderStatus.status}).',
+                             'already_exists': True
+                         }))
+                         return
+
         contract = None
         mode = "Unknown"
 
         # 1. Rozhodnutie o type kontraktu
-        if args.call_strike is not None and args.put_strike is not None:
-            # STRANGLE COMBO (Dve nohy)
-            mode = "Combo"
-            c_leg = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD', multiplier='100')
-            p_leg = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART', currency='USD', multiplier='100')
-            
-            qualified = ib.qualifyContracts(c_leg, p_leg)
-            if len(qualified) < 2:
-                print(json.dumps({'success': False, 'error': f'Nepodarilo sa overiť opčné kontrakty pre {args.symbol} {args.expiry}.'}))
-                sys.exit(1)
+        exp2 = args.expiry_2 if args.expiry_2 else args.expiry
+        act2 = args.action_2 if args.action_2 else ('SELL' if args.action == 'BUY' else 'BUY')
 
+        if (args.call_strike_2 is not None or args.put_strike_2 is not None):
+            # COMBO BAG (Viacnohá stratégia)
+            mode = "Combo"
+            legs = []
+            
+            # Leg 1
+            if args.call_strike is not None:
+                l1 = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART')
+            else:
+                l1 = Option(args.symbol, args.expiry, args.put_strike, 'P', 'SMART')
+            
+            # Leg 2
+            if args.call_strike_2 is not None:
+                l2 = Option(args.symbol, exp2, args.call_strike_2, 'C', 'SMART')
+            else:
+                l2 = Option(args.symbol, exp2, args.put_strike_2, 'P', 'SMART')
+                
+            qualified = ib.qualifyContracts(l1, l2)
+            if len(qualified) < 2:
+                print(json.dumps({'success': False, 'error': 'Nepodarilo sa overiť nohy combo objednávky.'}))
+                sys.exit(1)
+                
             legs = [
-                ComboLeg(conId=c_leg.conId, ratio=1, action=args.action, exchange='SMART'),
-                ComboLeg(conId=p_leg.conId, ratio=1, action=args.action, exchange='SMART')
+                ComboLeg(conId=qualified[0].conId, ratio=1, action=args.action, exchange='SMART'),
+                ComboLeg(conId=qualified[1].conId, ratio=1, action=act2, exchange='SMART')
             ]
             contract = Bag(symbol=args.symbol, exchange='SMART', currency='USD', comboLegs=legs)
             ib.qualifyContracts(contract)
-            
-        elif args.call_strike is not None:
+
+        elif args.call_strike is not None and args.put_strike is not None:
+            # STRANGLE (Kompatibilita)
             # SINGLE CALL
             mode = "Call"
             contract = Option(args.symbol, args.expiry, args.call_strike, 'C', 'SMART', currency='USD', multiplier='100')
@@ -96,7 +137,15 @@ def main():
         # 2. Získanie ceny pre Limit Order
         price = 0.0
         source = "None"
-        ticker = ib.reqMktData(contract, '106', False, False)
+        
+        # Pre combo Bag nezískavame live cenu automaticky, ak už nie je zadaná limit cena
+        # Alebo ak je combo, ib_insync ib.reqMktData(contract) vyžaduje snapshot=False
+        
+        # Ak sme dostali v argumentoch cenu, použijeme ju (Zatiaľ pridáme argument pre combo cenu)
+        # Zjednodušíme to: ak je cena v argumentoch, použijeme ju.
+        limit_arg_price = getattr(args, 'limit_price', 0.0)
+        
+        ticker = ib.reqMktData(contract, '', False, False)
         
         start = time.time()
         while time.time() - start < 5:
@@ -114,7 +163,10 @@ def main():
         ib.cancelMktData(contract)
 
         # 3. Vytvorenie objednávky
-        if price > 0:
+        if args.price is not None and args.price != 0:
+            order = LimitOrder(args.action, quantity, args.price)
+            order_type_msg = f"Limit Order @ {args.price}"
+        elif price > 0:
             # Buffer pre Limit: BUY (+5%), SELL (-5%)
             # ALEBO aspoň 0.05 USD posun pre istotu
             if args.action == 'BUY':

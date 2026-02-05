@@ -293,12 +293,15 @@ class HedgeManagerGUI:
                 import modularny.tab_monitor
                 import modularny.tab_swing_watcher
                 import modularny.tab_swing_hunter # NOVÉ
+                import modularny.tab_pmcc_hunter # NOVÉ
                 importlib.reload(modularny.tab_monitor)
                 importlib.reload(modularny.tab_swing_watcher)
                 importlib.reload(modularny.tab_swing_hunter) # NOVÉ
+                importlib.reload(modularny.tab_pmcc_hunter) # NOVÉ
                 from modularny.tab_monitor import create_monitor_tab
                 from modularny.tab_swing_watcher import create_swing_watcher_tab
                 from modularny.tab_swing_hunter import create_swing_hunter_tab # NOVÉ
+                from modularny.tab_pmcc_hunter import create_pmcc_hunter_tab # NOVÉ
                 
                 create_monitor_tab(tab_port, self.state)
                 
@@ -307,10 +310,15 @@ class HedgeManagerGUI:
                 notebook.add(tab_swing, text="📈 Swing Watcher")
                 create_swing_watcher_tab(tab_swing, self.state)
 
-                # === TAB 6: Swing Hunter (NOVÉ) ===
+                # === TAB 6: Swing Hunter ===
                 tab_hunter = ttk.Frame(notebook)
                 notebook.add(tab_hunter, text="🏹 Swing Hunter")
                 create_swing_hunter_tab(tab_hunter, self.state)
+
+                # === TAB 7: PMCC Hunter (NOVÉ) ===
+                tab_pmcc = ttk.Frame(notebook)
+                notebook.add(tab_pmcc, text="💰 PMCC Hunter")
+                create_pmcc_hunter_tab(tab_pmcc, self.state)
                 
             except Exception as e:
                 import traceback
