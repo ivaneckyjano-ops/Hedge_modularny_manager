@@ -797,8 +797,8 @@
   "monitor_profit_target_pct": "25.0",
   "monitor_profit_warning_pct": "20.0",
   "monitor_stock_profit_target_usd": "0.75",
-  "monitor_auto_close_var": true,
-  "monitor_auto_restart_var": true,
+  "monitor_auto_close_var": false,
+  "monitor_auto_restart_var": false,
   "monitor_trailing_opt_pct": "1",
   "monitor_trailing_stk_usd": "2.0",
   "monitor_selected_symbols": [
@@ -818,7 +818,14 @@
     "ADBE",
     "IT",
     "NIO",
-    "OTEX"
+    "OTEX",
+    "ASML",
+    "AVGO",
+    "BLK",
+    "IWM",
+    "LLY",
+    "UBER",
+    "PLTR"
   ],
   "hunter_custom_tickers": [
     "ULTA",
@@ -889,7 +896,26 @@
     "SQ",
     "SBUX",
     "PFE",
-    "GM"
+    "GM",
+    "F",
+    "BAC",
+    "SOFI",
+    "CCL",
+    "INTC"
   ],
-  "hunter_pinned_symbols": []
+  "hunter_pinned_symbols": [],
+  "pmcc_symbols": [
+    "BAC",
+    "CCL",
+    "F",
+    "NTC",
+    "KO",
+    "PYPL",
+    "SOFI",
+    "XLF",
+    "XLI",
+    "CMCSA",
+    "T",
+    "PLTR"
+  ]
 }

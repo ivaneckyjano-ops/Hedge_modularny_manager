@@ -113,3 +113,10 @@ EntryTime,Symbol,Timeframe,EntryPrice,RSI,PercentB,SignalType,ExitPrice,FinalPL
 2026-02-05T18:17:29.240055,EXPE,4 hours,236.77,31.10,20.0,🚀 STRONG BUY,,,hunt,Býk,90,0,1,+2.05,🚀 STRONG BUY
 2026-02-05T18:20:07.007008,MU,4 hours,380.35,39.91,10.3,🚀 STRONG BUY,,,hunt,Býk,90,0,1,-1.32,🚀 STRONG BUY
 2026-02-05T18:21:09.980453,ONTO,4 hours,192.92,39.86,23.6,🚀 STRONG BUY,,,hunt,Býk,90,0,1,+1.32,🚀 STRONG BUY
+2026-02-06T10:36:03.876295,CMCSA,4 hours,30.85,65.96,85.1,Trend Breakout,,,risk,Býk,0,0,0,+1.09,Trend Breakout
+2026-02-06T10:36:51.408932,ENPH,4 hours,47.26,62.89,76.0,Trend Breakout,,,neutral,Býk,18,0,1,-2.86,Trend Breakout
+2026-02-06T10:36:58.922171,EQIX,4 hours,807.46,50.34,37.0,Trend Breakout,,,hold,Býk,0,0,0,+0.22,Trend Breakout
+2026-02-07T10:13:09.021667,BKE,4 hours,52.09,65.72,90.6,Trend Breakout,,,risk,Býk,20,0,1,+3.08,Trend Breakout
+2026-02-07T10:13:44.659691,CMCSA,4 hours,31.36,70.73,92.0,Trend Breakout,,,risk,Býk,18,0,1,+2.11,Trend Breakout
+2026-02-07T10:14:17.323293,ENPH,4 hours,49.78,67.09,77.9,Trend Breakout,,,neutral,Býk,0,0,0,+1.90,Trend Breakout
+2026-02-07T10:14:24.881556,EQIX,4 hours,848.13,68.01,106.6,Trend Breakout,,,risk,Býk,20,0,1,+5.37,Trend Breakout

@@ -13,6 +13,33 @@ import sys
 import time
 from datetime import datetime
 
+class ToolTip:
+    """Pomocná trieda pre zobrazenie vyskakovacích bublín (tooltips)"""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        widget.bind("<Enter>", self.show_tip)
+        widget.bind("<Leave>", self.hide_tip)
+
+    def show_tip(self, event=None):
+        if self.tip_window or not self.text: return
+        x, y, _cx, cy = self.widget.bbox("insert")
+        x = x + self.widget.winfo_rootx() + 25
+        y = y + cy + self.widget.winfo_rooty() + 25
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                      background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                      font=("tahoma", "8", "normal"), padx=5, pady=2)
+        label.pack(ipadx=1)
+
+    def hide_tip(self, event=None):
+        tw = self.tip_window
+        self.tip_window = None
+        if tw: tw.destroy()
+
 class PMCCHunterTab:
     def __init__(self, parent, state):
         self.parent = parent
@@ -20,7 +47,8 @@ class PMCCHunterTab:
         self.frame = ttk.Frame(parent)
         self.frame.pack(fill='both', expand=True)
         
-        self.last_pmcc_data = {} # Symbol -> PMCC data
+        self.last_pmcc_data = {} # Symbol -> Aktuálne vybratá PMCC data
+        self.all_pmcc_options = {} # Symbol -> Zoznam všetkých validných PMCC kombinácií
         self.setup_ui()
         
     def setup_ui(self):
@@ -28,6 +56,17 @@ class PMCCHunterTab:
         ctrl = ttk.LabelFrame(self.frame, text="⚙️ Parametre PMCC", padding=10)
         ctrl.pack(fill='x', padx=10, pady=5)
         
+        # Riadok 0: Vlastný zoznam symbolov
+        row0 = ttk.Frame(ctrl)
+        row0.pack(fill='x', pady=2)
+        ttk.Label(row0, text="Zoznam symbolov (vlastný):").pack(side='left', padx=5)
+        
+        initial_syms = ", ".join(getattr(self.state, 'pmcc_symbols', []))
+        self.pmcc_symbols_var = tk.StringVar(value=initial_syms)
+        self.pmcc_symbols_entry = ttk.Entry(row0, textvariable=self.pmcc_symbols_var)
+        self.pmcc_symbols_entry.pack(side='left', fill='x', expand=True, padx=5)
+        self.pmcc_symbols_var.trace_add('write', self.on_symbols_changed)
+
         # Riadok 1: Filtre
         row1 = ttk.Frame(ctrl)
         row1.pack(fill='x', pady=2)
@@ -63,25 +102,53 @@ class PMCCHunterTab:
         t_frame = ttk.Frame(self.frame)
         t_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
-        cols = ('price', 'debit', 'max_profit', 'be_pct', 'extrinsic', 'iv', 'yield', 'status')
+        cols = ('price', 'debit', 'c_pct', 'lev', 'mont', 'max_profit', 'be_pct', 'extrinsic', 'iv', 'yield', 'status')
         self.tree = ttk.Treeview(t_frame, columns=cols, show='tree headings')
         
-        self.tree.heading('#0', text='Symbol')
-        self.tree.heading('price', text='Cena Akcie/Opcie')
-        self.tree.heading('debit', text='Net Debit')
-        self.tree.heading('max_profit', text='Max Profit')
-        self.tree.heading('be_pct', text='Break-even %')
-        self.tree.heading('extrinsic', text='Extrinsic %')
-        self.tree.heading('iv', text='IV %')
-        self.tree.heading('yield', text='Ročný Výnos %')
-        self.tree.heading('status', text='Status')
+        # Skrátené názvy hlavičiek
+        self.tree.heading('#0', text='Symbol', command=lambda: self.treeview_sort_column('#0', False))
+        self.tree.heading('price', text='Cena/Opc', command=lambda: self.treeview_sort_column('price', False))
+        self.tree.heading('debit', text='Debit', command=lambda: self.treeview_sort_column('debit', False))
+        self.tree.heading('c_pct', text='C %', command=lambda: self.treeview_sort_column('c_pct', False))
+        self.tree.heading('lev', text='Lev', command=lambda: self.treeview_sort_column('lev', False))
+        self.tree.heading('mont', text='Mont', command=lambda: self.treeview_sort_column('mont', False))
+        self.tree.heading('max_profit', text='MP $', command=lambda: self.treeview_sort_column('max_profit', False))
+        self.tree.heading('be_pct', text='BE %', command=lambda: self.treeview_sort_column('be_pct', False))
+        self.tree.heading('extrinsic', text='Ex %', command=lambda: self.treeview_sort_column('extrinsic', False))
+        self.tree.heading('iv', text='IV %', command=lambda: self.treeview_sort_column('iv', False))
+        self.tree.heading('yield', text='Yield %', command=lambda: self.treeview_sort_column('yield', False))
+        self.tree.heading('status', text='Status', command=lambda: self.treeview_sort_column('status', False))
         
-        self.tree.column('#0', width=100, anchor='w')
-        self.tree.column('price', width=120, anchor='center')
-        self.tree.column('debit', width=350, anchor='w')
-        for col in cols[2:]:
-            self.tree.column(col, width=100, anchor='center')
-        self.tree.column('status', width=150)
+        # Nastavenie šírok (minimalizované)
+        self.tree.column('#0', width=80, anchor='w')
+        self.tree.column('price', width=90, anchor='center')
+        self.tree.column('debit', width=65, anchor='center')
+        self.tree.column('c_pct', width=50, anchor='center')
+        self.tree.column('lev', width=50, anchor='center')
+        self.tree.column('mont', width=55, anchor='center')
+        self.tree.column('max_profit', width=70, anchor='center')
+        self.tree.column('be_pct', width=60, anchor='center')
+        self.tree.column('extrinsic', width=60, anchor='center')
+        self.tree.column('iv', width=60, anchor='center')
+        self.tree.column('yield', width=70, anchor='center')
+        self.tree.column('status', width=120)
+
+        self.tree.bind("<Motion>", self.handle_header_tooltips)
+        self.tree.bind("<Button-3>", self.show_context_menu)
+        
+        self.header_tooltips = {
+            'price': "Aktuálna cena akcie (alebo prémia opcie v detaile)",
+            'debit': "Net Debit - Celková cena za kombináciu (Leg1 - Leg2)",
+            'c_pct': "Cushion % - (Short Premium / Net Debit) * 100. Kolko % nákladov vráti jeden výpis.",
+            'lev': "Leverage Quality - (Net Debit / Stock Price). Pomer ceny k akcii. Ideálne 0.4 - 0.6.",
+            'mont': "Recovery Months (ERT) - (Extrinsic Long / Short Premium). Kolko mesiacov sa spláca časová hodnota LEAPS.",
+            'max_profit': "Max Profit - Maximálny teoretický zisk ak je akcia pri expirácii na strike Short Callu.",
+            'be_pct': "Break-Even % - O koľko % sa musí pohnúť akcia, aby bol obchod na nule.",
+            'extrinsic': "Extrinsic % - Pomer časovej hodnoty k celkovej cene LEAPS opcie.",
+            'iv': "Implied Volatility - Očakávaná volatilita trhom.",
+            'yield': "Ročný Výnos % - Annualizovaný výnos z pravidelného vypisovania Short Callu.",
+            'status': "Aktuálny stav signálu a zóny (HUNT = Touch BB/MA200)"
+        }
         
         self.tree.pack(side='left', fill='both', expand=True)
         sb = ttk.Scrollbar(t_frame, command=self.tree.yview); sb.pack(side='right', fill='y'); self.tree.configure(yscrollcommand=sb.set)
@@ -96,6 +163,7 @@ class PMCCHunterTab:
 
         self.tree.tag_configure('ideal', background='#c8e6c9') 
         self.tree.tag_configure('warning', background='#fff9c4') 
+        self.tree.tag_configure('danger', background='#ffcdd2')
         self.tree.tag_configure('child', background='#f5f5f5')
 
     def open_in_trade_plan(self):
@@ -157,10 +225,30 @@ class PMCCHunterTab:
         self.status_var.set("⏹️ ZASTAVENÉ")
         self.status_lbl.config(foreground="red")
 
+    def on_symbols_changed(self, *args):
+        """Uloží zmenený zoznam symbolov do state"""
+        raw = self.pmcc_symbols_var.get()
+        # Rozdelíme podľa čiarky alebo medzery
+        syms = [s.strip().upper() for s in raw.replace(',', ' ').split() if s.strip()]
+        self.state.pmcc_symbols = syms
+        # Uložíme do súboru (asynchrónne, aby to nesekalo pri písaní)
+        if not hasattr(self, '_save_timer') or self._save_timer is None:
+            self._save_timer = self.parent.after(2000, self._delayed_save)
+
+    def _delayed_save(self):
+        self.state.save_settings_file()
+        self._save_timer = None
+
     def run_pmcc_scan(self, forced_symbols=None):
-        symbols = forced_symbols or [s for s, v in getattr(self.state, 'hunter_selected_symbols', {}).items() if v.get()]
+        if forced_symbols:
+            symbols = forced_symbols
+        else:
+            # Použijeme vlastný zoznam z Entry poľa
+            raw = self.pmcc_symbols_var.get()
+            symbols = [s.strip().upper() for s in raw.replace(',', ' ').split() if s.strip()]
+            
         if not symbols:
-            messagebox.showwarning("PMCC Hunter", "Vyberte symboly v Swing Hunteri alebo použite Sync.")
+            messagebox.showwarning("PMCC Hunter", "Zadajte aspoň jeden symbol do poľa 'Zoznam symbolov'.")
             return
             
         self.scan_session_id += 1
@@ -255,6 +343,16 @@ class PMCCHunterTab:
                 # Formula: (Premium / Debit) * (365 / DTE)
                 ann_yield = (s['price'] / net_debit) * (365 / s['dte']) * 100 if net_debit > 0 and s['dte'] > 0 else 0
                 
+                # NOVÉ METRIKY:
+                # 1. Cushion_Ratio (%)
+                cushion = (s['price'] / net_debit) * 100 if net_debit > 0 else 0
+                
+                # 2. Leverage Quality (Net_Debit / Current_Stock_Price)
+                lev_quality = net_debit / price if price > 0 else 0
+                
+                # 3. Recovery Months (ERT)
+                recovery = extrinsic / s['price'] if s['price'] > 0 else 0
+                
                 valid_pmccs.append({
                     'symbol': symbol,
                     'price': f"{price:.2f}",
@@ -265,18 +363,23 @@ class PMCCHunterTab:
                     'leaps_data': l,
                     'short_data': s,
                     'debit': f"{net_debit:.2f}",
+                    'c_pct': f"{cushion:.1f}%",
+                    'lev': f"{lev_quality:.2f}",
+                    'mont': f"{recovery:.1f}{' ⚠️' if recovery > 6 else ''}",
                     'max_profit': f"${max_profit:.0f}",
                     'be_pct': f"{be_pct:+.1f}%",
                     'extrinsic': f"{ext_pct:.1f}%",
                     'iv': f"{iv*100:.1f}%" if iv > 0 else "—",
                     'yield': f"{ann_yield:.1f}%",
                     'status': "🔥 BUY ZONE" if is_buying_zone else "✅ VALIDNÉ",
-                    'score': score
+                    'score': score,
+                    'is_danger': cushion < 3.0
                 })
         
         if valid_pmccs:
             # Vyberieme najlepší podľa score
             valid_pmccs.sort(key=lambda x: x['score'], reverse=True)
+            self.all_pmcc_options[symbol] = valid_pmccs
             best = valid_pmccs[0]
             self.last_pmcc_data[symbol] = best
             self.parent.after(0, lambda: self.add_to_tree(best))
@@ -289,26 +392,185 @@ class PMCCHunterTab:
         try:
             ext = float(p['extrinsic'].replace('%',''))
             be = float(p['be_pct'].replace('%','').replace('+',''))
-            if ext < 5.0 and be < 2.0: tag = 'ideal'
+            
+            if p.get('is_danger'): tag = 'danger'
+            elif ext < 5.0 and be < 2.0: tag = 'ideal'
             elif "BUY ZONE" in p['status']: tag = 'ideal'
             elif ext > 10.0: tag = 'warning'
         except: pass
         
+        # Skontrolujeme, či už symbol v tabuľke je (ak áno, vymažeme ho a nahradíme)
+        for item in self.tree.get_children(''):
+            if self.tree.item(item, 'text') == p['symbol']:
+                self.tree.delete(item)
+                break
+
         # Rodičovský riadok
         parent_id = self.tree.insert('', tk.END, text=p['symbol'], values=(
-            p['price'], p['debit'], p['max_profit'], p['be_pct'], p['extrinsic'], p['iv'], p['yield'], p['status']
+            p['price'], p['debit'], p['c_pct'], p['lev'], p['mont'], 
+            p['max_profit'], p['be_pct'], p['extrinsic'], p['iv'], p['yield'], p['status']
         ), tags=(tag,) if tag else ())
         
         # Detailné riadky (dieťa)
         self.tree.insert(parent_id, tk.END, text="  Leg 1", values=(
-            p['leaps_price'], p['leaps_txt'], "", "", "", "", "", ""
+            p['leaps_price'], p['leaps_txt'], "", "", "", "", "", "", "", "", ""
         ), tags=('child',))
         self.tree.insert(parent_id, tk.END, text="  Leg 2", values=(
-            p['short_price'], p['short_txt'], "", "", "", "", "", ""
+            p['short_price'], p['short_txt'], "", "", "", "", "", "", "", "", ""
         ), tags=('child',))
         
-        # Automaticky otvoriť
-        self.tree.item(parent_id, open=True)
+        # Automaticky neotvárať (ponechať zatvorené pre prehľadnosť)
+        self.tree.item(parent_id, open=False)
+
+    def treeview_sort_column(self, col, reverse):
+        """Usporiada tabuľku podľa kliknutého stĺpca (len rodičovské riadky)"""
+        l = []
+        # Získame len rodičovské riadky (tie, ktoré nemajú rodiča v treeview)
+        for k in self.tree.get_children(''):
+            val = self.tree.set(k, col) if col != '#0' else self.tree.item(k, 'text')
+            
+            # Prevod na číslo pre správne radenie (ak je to možné)
+            clean_val = val
+            if isinstance(val, str):
+                clean_val = val.replace('%', '').replace('$', '').replace('+', '').replace('—', '-1').strip()
+                try:
+                    clean_val = float(clean_val)
+                except ValueError:
+                    clean_val = val.lower()
+            
+            l.append((clean_val, k))
+
+        # Usporiadame zoznam
+        l.sort(reverse=reverse, key=lambda x: x[0])
+
+        # Presunieme položky v Treeview (len rodičov, deti ostanú pri nich)
+        for index, (val, k) in enumerate(l):
+            self.tree.move(k, '', index)
+
+        # Zmeníme smer radenia pre ďalšie kliknutie
+        self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
+
+    def handle_header_tooltips(self, event):
+        """Detekuje pohyb myši nad hlavičkou a zobrazí správny tooltip"""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            column = self.tree.identify_column(event.x)
+            # column je vo formáte '#0', '#1', '#2'...
+            try:
+                col_id = self.tree["columns"][int(column[1:]) - 1] if column != '#0' else None
+                if col_id and col_id in self.header_tooltips:
+                    text = self.header_tooltips[col_id]
+                    if not hasattr(self, '_current_tip_text') or self._current_tip_text != text:
+                        self._current_tip_text = text
+                        # Zobrazenie tooltipu pomocou dočasného Labelu
+                        self.show_header_tip(event.x_root, event.y_root, text)
+                else:
+                    self.hide_header_tip()
+            except: 
+                self.hide_header_tip()
+        else:
+            self.hide_header_tip()
+
+    def show_header_tip(self, x, y, text):
+        self.hide_header_tip()
+        self._tip_win = tk.Toplevel()
+        self._tip_win.wm_overrideredirect(True)
+        self._tip_win.wm_geometry(f"+{x+15}+{y+15}")
+        tk.Label(self._tip_win, text=text, background="#ffffca", relief="solid", borderwidth=1, font=("Arial", 9)).pack()
+
+    def hide_header_tip(self):
+        if hasattr(self, '_tip_win') and self._tip_win:
+            self._tip_win.destroy()
+            self._tip_win = None
+            self._current_tip_text = None
+
+    def show_context_menu(self, event):
+        """Zobrazí kontextové menu po kliknutí pravým tlačidlom"""
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            menu = tk.Menu(self.parent, tearoff=0)
+            menu.add_command(label="🎯 ZMENIŤ STRIKE (Simulátor)", command=self.open_strike_simulator)
+            menu.add_separator()
+            menu.add_command(label="🚀 OTVORIŤ V TRADE PLAN", command=self.open_in_trade_plan)
+            menu.post(event.x_root, event.y_root)
+
+    def open_strike_simulator(self):
+        """Otvorí okno pre výber inej kombinácie (Short Striku)"""
+        selected = self.tree.selection()
+        if not selected: return
+        
+        parent_id = selected[0]
+        if self.tree.parent(parent_id): parent_id = self.tree.parent(parent_id)
+        symbol = self.tree.item(parent_id, 'text')
+        
+        options = self.all_pmcc_options.get(symbol, [])
+        if not options:
+            messagebox.showinfo("Simulátor", f"Pre {symbol} nie sú k dispozícii iné kombinácie.")
+            return
+
+        # Vytvorenie dialógového okna
+        win = tk.Toplevel(self.parent)
+        win.title(f"🎯 Simulátor Striku - {symbol}")
+        win.geometry("800x400")
+        win.transient(self.parent)
+        win.grab_set()
+
+        ttk.Label(win, text=f"Vyberte inú kombináciu pre {symbol}:", font=('Arial', 10, 'bold')).pack(pady=10)
+
+        # Tabuľka možností - rozšírená o expirácie a prémiu
+        cols = ('short_exp', 'short_strike', 'premium', 'long_exp', 'long_strike', 'c_pct', 'mont', 'debit', 'profit')
+        stree = ttk.Treeview(win, columns=cols, show='headings', height=12)
+        
+        stree.heading('short_exp', text='Short Exp')
+        stree.heading('short_strike', text='Short Strike')
+        stree.heading('premium', text='Premium')
+        stree.heading('long_exp', text='Long Exp')
+        stree.heading('long_strike', text='Long Strike')
+        stree.heading('c_pct', text='C %')
+        stree.heading('mont', text='Mont')
+        stree.heading('debit', text='Net Debit')
+        stree.heading('profit', text='Max Profit')
+        
+        widths = {'short_exp': 100, 'short_strike': 80, 'premium': 70, 'long_exp': 100, 'long_strike': 80, 'c_pct': 50, 'mont': 50, 'debit': 70, 'profit': 80}
+        for c, w in widths.items(): 
+            stree.column(c, width=w, anchor='center')
+        
+        stree.pack(fill='both', expand=True, padx=10)
+
+        # Naplnenie dátami
+        for i, o in enumerate(options):
+            tag = 'danger' if o.get('is_danger') else ''
+            # Formátovanie expirácie: "YYYY-MM-DD (DTE d)"
+            s_exp = f"{o['short_data']['expiry']} ({o['short_data']['dte']}d)"
+            l_exp = f"{o['leaps_data']['expiry']} ({o['leaps_data']['dte']}d)"
+            
+            stree.insert('', tk.END, iid=str(i), values=(
+                s_exp,
+                o['short_data']['strike'],
+                o['short_price'],
+                l_exp,
+                o['leaps_data']['strike'],
+                o['c_pct'],
+                o['mont'],
+                o['debit'],
+                o['max_profit']
+            ), tags=(tag,))
+        
+        stree.tag_configure('danger', foreground='red')
+
+        def select():
+            sel = stree.selection()
+            if not sel: return
+            idx = int(sel[0])
+            chosen = options[idx]
+            
+            # Aktualizácia dát a tabuľky
+            self.last_pmcc_data[symbol] = chosen
+            self.add_to_tree(chosen)
+            win.destroy()
+
+        ttk.Button(win, text="✅ POUŽIŤ TÚTO KOMBINÁCIU", command=select).pack(pady=10)
 
 def create_pmcc_hunter_tab(parent, state):
     return PMCCHunterTab(parent, state)

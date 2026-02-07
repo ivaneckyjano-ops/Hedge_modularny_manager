@@ -2125,6 +2125,27 @@ def refresh_trade_plan_vars(state, window, symbol, summary):
     if entry_value and sl and tp1 and entry_value != sl:
         rr_val = (tp1 - entry_value) / abs(entry_value - sl)
 
+    # --- ŠPECIÁLNA LOGIKA PRE PMCC ---
+    pmcc = data.get('pmcc')
+    if data.get('option_strategy') == 'PMCC' and pmcc:
+        # Pre PMCC prepíšeme SL/TP hodnoty na tie, ktoré dávajú zmysel pre opcie
+        # SL = Strike dlhej opcie (ak tam akcia klesne, sme hlboko v strate)
+        sl = pmcc['leaps_data']['strike']
+        # TP1 = Strike krátkej opcie (maximálny zisk stratégie)
+        tp1 = pmcc['short_data']['strike']
+        # TP2 = Vyšší pivot alebo +5% nad short strike
+        tp2 = tp1 * 1.05
+        
+        # Prepočítať R:R na základe ceny akcie (len orientačne)
+        if entry_value and sl and tp1 and entry_value != sl:
+            rr_val = (tp1 - entry_value) / abs(entry_value - sl)
+            
+        plan_vars['option_reason'].set(
+            f"Vstup: Debet {pmcc['debit']}$ | "
+            f"SL (Akcia): pod {sl}$ (alebo -50% debetu) | "
+            f"TP (Akcia): {tp1}$"
+        )
+
     # 4. Set variables
     plan_vars['entry'].set(_fmt(entry))
     plan_vars['sl'].set(_fmt(sl))
@@ -2177,6 +2198,10 @@ def open_tws_execution_window(state, symbol, plan_vars, summary):
     l2_greeks = tk.StringVar(value="Cena: — | Δ: — | Θ: —")
     
     net_price_var = tk.StringVar(value="0.00")
+    
+    # NOVÉ: Targety z plánu
+    sl_target = plan_vars['sl'].get()
+    tp_target = plan_vars['tp1'].get()
     
     strategy_desc_var = tk.StringVar(value="SINGLE OPTION")
 
@@ -2265,6 +2290,12 @@ def open_tws_execution_window(state, symbol, plan_vars, summary):
     ttk.Label(params_frame, text="Net Limit Cena:").grid(row=0, column=0, sticky='w')
     ttk.Entry(params_frame, textvariable=net_price_var, width=12).grid(row=0, column=1, sticky='w', padx=5)
     ttk.Label(params_frame, text="(Debet/Kredit)", font=('Arial', 8, 'italic')).grid(row=0, column=2, sticky='w')
+
+    # Zobrazenie targetov z plánu pre orientáciu
+    target_frame = ttk.Frame(params_frame)
+    target_frame.grid(row=1, column=0, columnspan=3, sticky='w', pady=(5,0))
+    ttk.Label(target_frame, text=f"Plánované výstupy (Akcia):", font=('Arial', 8, 'bold')).pack(side='left')
+    ttk.Label(target_frame, text=f" SL: {sl_target}$ | TP: {tp_target}$", font=('Arial', 8), foreground='#c62828').pack(side='left', padx=5)
 
     # LEGS container
     legs_canvas = tk.Canvas(main_frame, highlightthickness=0)

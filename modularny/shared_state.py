@@ -196,6 +196,9 @@ class SharedState:
         self.hunter_custom_tickers = [] # NOVÉ: Vlastné tickery pre Swing Hunter
         self.hunter_pinned_symbols = []
         
+        # NOVÉ: PMCC Hunter - vlastné symboly
+        self.pmcc_symbols = [] # Zoznam symbolov pre PMCC
+        
         # NOVÉ: Swing Profit Watcher nastavenia
         self.monitor_profit_target_pct = tk.StringVar(value="50.0") # Cieľ pre zatvorenie opcií
         self.monitor_profit_warning_pct = tk.StringVar(value="30.0") # Cieľ pre upozornenie opcií
@@ -838,6 +841,7 @@ class SharedState:
                     # Načítaj vlastné tickery pre Hunter
                     self.hunter_custom_tickers = data.get('hunter_custom_tickers', [])
                     self.hunter_pinned_symbols = data.get('hunter_pinned_symbols', [])
+                    self.pmcc_symbols = data.get('pmcc_symbols', ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"])
             else:
                 self.saved_strategies = {}
                 # Nastav default hodnoty aj pre Semafor a model priority ak súbor neexistuje
@@ -848,6 +852,7 @@ class SharedState:
                 self.gs_model_priority_var.set(False)
                 self.hunter_custom_tickers = []
                 self.hunter_pinned_symbols = []
+                self.pmcc_symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"]
 
         except Exception as e:
             print(f"Chyba pri načítavaní nastavení: {e}")
@@ -885,7 +890,8 @@ class SharedState:
                 'monitor_trailing_stk_usd': self.monitor_trailing_stk_usd.get(),
                 'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()],
                 'hunter_custom_tickers': getattr(self, 'hunter_custom_tickers', []),
-                'hunter_pinned_symbols': getattr(self, 'hunter_pinned_symbols', [])
+                'hunter_pinned_symbols': getattr(self, 'hunter_pinned_symbols', []),
+                'pmcc_symbols': getattr(self, 'pmcc_symbols', [])
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
