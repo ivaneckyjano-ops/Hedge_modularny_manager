@@ -15,13 +15,14 @@ if venv_site.exists(): sys.path.insert(0, str(venv_site))
 
 from ib_insync import IB, Stock, Option, util
 
-# --- Black-Scholes model pre výpočet Greeks pri zatvorenom trhu ---
-def black_scholes_call_greeks(S, K, T, r, sigma):
+# --- Black-Scholes model pre výpočet Greeks a ceny pri zatvorenom trhu ---
+def black_scholes_call_info(S, K, T, r, sigma):
     """
     S: Cena podkladu, K: Strike, T: Čas do expirácie (v rokoch), 
     r: Úroková miera (napr. 0.045), sigma: Volatilita (napr. 0.20)
+    Vráti (Cena, Delta, Theta)
     """
-    if T <= 0 or sigma <= 0: return 0.5, 0 # Default ak sú zlé dáta
+    if T <= 0 or sigma <= 0: return (max(0.01, S - K), 0.5, 0) # Default ak sú zlé dáta
     
     try:
         d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -35,12 +36,13 @@ def black_scholes_call_greeks(S, K, T, r, sigma):
         def pdf(x):
             return math.exp(-0.5 * x**2) / math.sqrt(2.0 * math.pi)
 
+        price = S * cdf(d1) - K * math.exp(-r * T) * cdf(d2)
         delta = cdf(d1)
         # Theta pre Call (zjednodušená na dni)
         theta = -(S * pdf(d1) * sigma / (2 * math.sqrt(T)) + r * K * math.exp(-r * T) * cdf(d2))
-        return delta, theta / 365.0
+        return price, delta, theta / 365.0
     except:
-        return 0.5, 0
+        return (max(0.01, S - K), 0.5, 0)
 
 def calculate_historical_volatility(candles):
     if not candles or len(candles) < 10: return 0.25 # Default 25% ak niet dát
@@ -120,8 +122,8 @@ def main():
             print(json.dumps({'success': False, 'error': 'Chýbajú vhodné expirácie'}))
             return
 
-        leaps_expiries = leaps_expiries[:3]
-        short_expiries = short_expiries[:3]
+        leaps_expiries = leaps_expiries[:5]
+        short_expiries = short_expiries[:5]
         
         contracts = []
         for exp, dte in leaps_expiries + short_expiries:
@@ -162,8 +164,7 @@ def main():
                 opt_price_model = g.optPrice
             else:
                 # Ak TWS nedodá Greeks, vypočítame si ich vlastným modelom
-                delta, theta = black_scholes_call_greeks(price, t.contract.strike, T_years, interest_rate, model_iv)
-                opt_price_model = 0 
+                opt_price_model, delta, theta = black_scholes_call_info(price, t.contract.strike, T_years, interest_rate, model_iv)
 
             # --- Robustnejší výber ceny opcie ---
             bid = t.bid if (t.bid > 0 and not math.isnan(t.bid)) else 0
@@ -196,8 +197,8 @@ def main():
         
         print(json.dumps({
             'success': True, 'underlying_price': price, 'iv': model_iv,
-            'leaps': sorted(leaps_list, key=lambda x: abs(x['delta'] - 0.80))[:15],
-            'short': sorted(short_list, key=lambda x: abs(x['delta'] - 0.25))[:15]
+            'leaps': sorted(leaps_list, key=lambda x: abs(x['delta'] - 0.80))[:40],
+            'short': sorted(short_list, key=lambda x: abs(x['delta'] - 0.25))[:40]
         }))
         
     except Exception as e:

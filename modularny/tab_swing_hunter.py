@@ -815,14 +815,29 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             subprocess.run(['pkill', '-f', 'tws_fetch_history.py'], capture_output=True)
     except: pass
 
-    # 1. Získať symboly (len tie zaškrtnuté v Hunterovi)
+    # 1. Získať symboly
     symbols = []
     try:
+        # Pôvodne zaškrtnuté symboly v Swing Hunterovi
+        selected_in_hunter = []
         if hasattr(state, 'hunter_selected_symbols'):
-            symbols = [s for s, v in state.hunter_selected_symbols.items() if v.get()]
+            selected_in_hunter = [s for s, v in state.hunter_selected_symbols.items() if v.get()]
         
-        # Unikátne symboly
-        symbols = sorted(list(set(symbols)))
+        # Symboly z PMCC Huntera (majú prioritu a skenujú sa vždy)
+        pmcc_syms = getattr(state, 'pmcc_symbols', [])
+        
+        # Spojíme ich: PMCC symboly idú prvé (priorita)
+        seen = set()
+        for s in pmcc_syms:
+            if s not in seen:
+                symbols.append(s)
+                seen.add(s)
+        
+        for s in sorted(selected_in_hunter):
+            if s not in seen:
+                symbols.append(s)
+                seen.add(s)
+
     except Exception as e:
         print(f"❌ Hunter: Symbol error: {e}", flush=True)
 

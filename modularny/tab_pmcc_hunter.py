@@ -102,12 +102,13 @@ class PMCCHunterTab:
         t_frame = ttk.Frame(self.frame)
         t_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
-        cols = ('price', 'debit', 'c_pct', 'lev', 'mont', 'max_profit', 'be_pct', 'extrinsic', 'iv', 'yield', 'status')
+        cols = ('price', 'rsi', 'debit', 'c_pct', 'lev', 'mont', 'max_profit', 'be_pct', 'extrinsic', 'iv', 'yield', 'status')
         self.tree = ttk.Treeview(t_frame, columns=cols, show='tree headings')
         
         # Skrátené názvy hlavičiek
         self.tree.heading('#0', text='Symbol', command=lambda: self.treeview_sort_column('#0', False))
         self.tree.heading('price', text='Cena/Opc', command=lambda: self.treeview_sort_column('price', False))
+        self.tree.heading('rsi', text='RSI', command=lambda: self.treeview_sort_column('rsi', False))
         self.tree.heading('debit', text='Debit', command=lambda: self.treeview_sort_column('debit', False))
         self.tree.heading('c_pct', text='C %', command=lambda: self.treeview_sort_column('c_pct', False))
         self.tree.heading('lev', text='Lev', command=lambda: self.treeview_sort_column('lev', False))
@@ -122,6 +123,7 @@ class PMCCHunterTab:
         # Nastavenie šírok (minimalizované)
         self.tree.column('#0', width=80, anchor='w')
         self.tree.column('price', width=90, anchor='center')
+        self.tree.column('rsi', width=45, anchor='center')
         self.tree.column('debit', width=65, anchor='center')
         self.tree.column('c_pct', width=50, anchor='center')
         self.tree.column('lev', width=50, anchor='center')
@@ -138,6 +140,7 @@ class PMCCHunterTab:
         
         self.header_tooltips = {
             'price': "Aktuálna cena akcie (alebo prémia opcie v detaile)",
+            'rsi': "Relative Strength Index (z Denného TF). Nad 65 = Prekúpené (Riziko otočenia).",
             'debit': "Net Debit - Celková cena za kombináciu (Leg1 - Leg2)",
             'c_pct': "Cushion % - (Short Premium / Net Debit) * 100. Kolko % nákladov vráti jeden výpis.",
             'lev': "Leverage Quality - (Net Debit / Stock Price). Pomer ceny k akcii. Ideálne 0.4 - 0.6.",
@@ -260,6 +263,21 @@ class PMCCHunterTab:
         self.skipped_var.set("—")
         self.skipped_list = []
         
+        # --- NOVÉ: Spustíme prioritný sken v Swing Hunteri pre tieto symboly ---
+        try:
+            from modularny.tab_swing_hunter import refresh_hunter
+            # Spustíme refresh v Swing Hunteri (ten už vie, že PMCC symboly majú prioritu)
+            # Voláme to v after(0), aby sme neblokovali UI vlákno
+            self.parent.after(0, lambda: refresh_hunter(
+                self.state, 
+                getattr(self.state, 'hunter_tree'), 
+                getattr(self.state, 'hunter_rsi_p'), 
+                getattr(self.state, 'hunter_rvi_p'), 
+                getattr(self.state, 'hunter_tf_v')
+            ))
+        except Exception as e:
+            print(f"Nepodarilo sa spustiť prioritný Swing Hunter sken: {e}")
+
         threading.Thread(target=self._scan_thread, args=(symbols, session_id), daemon=True).start()
 
     def _scan_thread(self, symbols, session_id):
@@ -313,9 +331,19 @@ class PMCCHunterTab:
         # Získame info zo Swing Huntera
         hunter_data = getattr(self.state, 'hunter_symbol_summaries', {}).get(symbol, {})
         is_buying_zone = hunter_data.get('zone') == 'hunt'
+        rsi = hunter_data.get('rsi', 0)
         
+        status = "✅ VALIDNÉ"
+        if is_buying_zone: status = "🔥 BUY ZONE"
+        if rsi > 65: status = "⚠️ OVERBOUGHT"
+        if rsi > 75: status = "🚫 VYSOKÉ RIZIKO"
+
         valid_pmccs = []
+        skip_reason = "Bez validnej kombinácie"
         
+        if not leaps: skip_reason = "Nenašli sa LEAPS"
+        elif not shorts: skip_reason = "Nenašli sa Short opcie"
+
         for l in leaps:
             if l['delta'] < min_delta_l: continue
             if l['spread_pct'] > max_spread: continue
@@ -331,7 +359,9 @@ class PMCCHunterTab:
                 if net_debit <= 0: continue
                 
                 strike_diff = s['strike'] - l['strike']
-                if strike_diff <= net_debit: continue
+                if strike_diff <= net_debit:
+                    if not valid_pmccs: skip_reason = "Vysoký debit > Strike Diff"
+                    continue
                 
                 max_profit = (strike_diff - net_debit) * 100
                 be_price = l['strike'] + net_debit
@@ -370,10 +400,11 @@ class PMCCHunterTab:
                     'be_pct': f"{be_pct:+.1f}%",
                     'extrinsic': f"{ext_pct:.1f}%",
                     'iv': f"{iv*100:.1f}%" if iv > 0 else "—",
+                    'rsi': f"{rsi:.0f}" if rsi > 0 else "—",
                     'yield': f"{ann_yield:.1f}%",
-                    'status': "🔥 BUY ZONE" if is_buying_zone else "✅ VALIDNÉ",
+                    'status': status,
                     'score': score,
-                    'is_danger': cushion < 3.0
+                    'is_danger': cushion < 3.0 or rsi > 70
                 })
         
         if valid_pmccs:
@@ -384,7 +415,7 @@ class PMCCHunterTab:
             self.last_pmcc_data[symbol] = best
             self.parent.after(0, lambda: self.add_to_tree(best))
         else:
-            self.skipped_list.append(symbol)
+            self.skipped_list.append(f"{symbol} ({skip_reason})")
             self.parent.after(0, lambda: self.skipped_var.set(", ".join(self.skipped_list)))
 
     def add_to_tree(self, p):
@@ -407,16 +438,16 @@ class PMCCHunterTab:
 
         # Rodičovský riadok
         parent_id = self.tree.insert('', tk.END, text=p['symbol'], values=(
-            p['price'], p['debit'], p['c_pct'], p['lev'], p['mont'], 
+            p['price'], p['rsi'], p['debit'], p['c_pct'], p['lev'], p['mont'], 
             p['max_profit'], p['be_pct'], p['extrinsic'], p['iv'], p['yield'], p['status']
         ), tags=(tag,) if tag else ())
         
         # Detailné riadky (dieťa)
         self.tree.insert(parent_id, tk.END, text="  Leg 1", values=(
-            p['leaps_price'], p['leaps_txt'], "", "", "", "", "", "", "", "", ""
+            p['leaps_price'], p['leaps_txt'], "", "", "", "", "", "", "", "", "", ""
         ), tags=('child',))
         self.tree.insert(parent_id, tk.END, text="  Leg 2", values=(
-            p['short_price'], p['short_txt'], "", "", "", "", "", "", "", "", ""
+            p['short_price'], p['short_txt'], "", "", "", "", "", "", "", "", "", ""
         ), tags=('child',))
         
         # Automaticky neotvárať (ponechať zatvorené pre prehľadnosť)
