@@ -112,27 +112,27 @@ def main():
             try:
                 exp_date = datetime.strptime(exp_str, '%Y%m%d')
                 dte = (exp_date - today).days
-                if 140 <= dte <= 600:
+                if 120 <= dte <= 750: # Rozšírený rozsah pre LEAPS
                     leaps_expiries.append((exp_str, dte))
-                elif 15 <= dte <= 70:
+                elif 10 <= dte <= 90: # Rozšírený rozsah pre Short
                     short_expiries.append((exp_str, dte))
             except: continue
         
         if not leaps_expiries or not short_expiries:
-            print(json.dumps({'success': False, 'error': 'Chýbajú vhodné expirácie'}))
+            print(json.dumps({'success': False, 'error': f'Vhodné expirácie nenájdené (DTE LEAPS: {[d for e,d in leaps_expiries]}, Short: {[d for e,d in short_expiries]})'}))
             return
 
-        leaps_expiries = leaps_expiries[:5]
-        short_expiries = short_expiries[:5]
+        leaps_expiries = leaps_expiries[:8] # Viac expirácií
+        short_expiries = short_expiries[:8]
         
         contracts = []
         for exp, dte in leaps_expiries + short_expiries:
             is_leaps = dte > 100
-            # Pre LEAPS hľadáme striky hlboko v peniazoch (ITM)
-            low_s, high_s = (price * 0.4, price * 0.95) if is_leaps else (price * 1.0, price * 1.4)
+            # Ešte širší rozsah strikov pre robustnosť
+            low_s, high_s = (price * 0.3, price * 1.0) if is_leaps else (price * 0.9, price * 1.5)
             valid_strikes = [s for s in chain.strikes if low_s <= s <= high_s]
-            if len(valid_strikes) > 25:
-                step = len(valid_strikes) // 25
+            if len(valid_strikes) > 30:
+                step = len(valid_strikes) // 30
                 valid_strikes = valid_strikes[::step]
             for s in valid_strikes:
                 contracts.append(Option(symbol, exp, s, 'C', 'SMART'))
@@ -158,19 +158,35 @@ def main():
             g = t.modelGreeks
             
             # --- FALLBACK LOGIKA PRE GREEKS ---
-            if g and g.delta is not None and not math.isnan(g.delta):
-                delta = abs(g.delta)
-                theta = g.theta or 0
-                opt_price_model = g.optPrice
-            else:
-                # Ak TWS nedodá Greeks, vypočítame si ich vlastným modelom
+            delta, theta, opt_price_model, opt_iv = 0.5, 0, 0, model_iv
+            
+            if g is not None:
+                delta = abs(getattr(g, 'delta', 0.5) or 0.5)
+                theta = getattr(g, 'theta', 0) or 0
+                opt_price_model = getattr(g, 'optPrice', 0) or 0
+                # Skúsime rôzne názvy pre IV
+                opt_iv = getattr(g, 'impliedVol', None) or getattr(g, 'impliedVolatility', None) or model_iv
+            
+            if delta == 0.5 and theta == 0: # Ak stále nemáme greeks, skúsime Black-Scholes
                 opt_price_model, delta, theta = black_scholes_call_info(price, t.contract.strike, T_years, interest_rate, model_iv)
 
-            # --- Robustnejší výber ceny opcie ---
+            # --- Robustnejší výber ceny opcie a základné info likvidity ---
             bid = t.bid if (t.bid > 0 and not math.isnan(t.bid)) else 0
             ask = t.ask if (t.ask > 0 and not math.isnan(t.ask)) else 0
             last = t.last if (t.last > 0 and not math.isnan(t.last)) else 0
             close = t.close if (t.close > 0 and not math.isnan(t.close)) else 0
+
+            # Sizes / OI / volume (môžu byť None alebo NaN mimo hodín)
+            def safe_int(val):
+                try:
+                    if val is None or math.isnan(float(val)): return 0
+                    return int(val)
+                except: return 0
+
+            bid_size = safe_int(getattr(t, 'bidSize', 0))
+            ask_size = safe_int(getattr(t, 'askSize', 0))
+            oi = safe_int(getattr(t, 'openInterest', 0))
+            vol = safe_int(getattr(t, 'volume', 0))
 
             if bid > 0 and ask > 0:
                 opt_price = (bid + ask) / 2
@@ -185,20 +201,32 @@ def main():
 
             if not opt_price or opt_price <= 0 or math.isnan(opt_price):
                 continue
-            
+
+            # percentuálny spread (bezpečný default 1.0 ak nie sú quotes)
+            spread_pct = (ask - bid) / opt_price if (bid > 0 and ask > 0 and opt_price > 0) else 1.0
+
+            # rychlá likviditná vlajka (pragmatická heuristika)
+            desired_contracts = 5
+            if dte < 100:
+                liquidity_flag = (oi >= 500 or vol >= 50) and (spread_pct < 0.02) and (min(bid_size, ask_size) >= desired_contracts)
+            else:
+                liquidity_flag = (oi >= 150 or vol >= 5) and (spread_pct < 0.03)
+
             data = {
                 'strike': t.contract.strike, 'expiry': exp_str, 'dte': dte,
                 'delta': delta, 'theta': theta, 'price': round(opt_price, 2),
-                'bid': bid, 'ask': ask, 'spread_pct': (ask-bid)/opt_price if (opt_price>0 and ask>0 and bid>0) else 0
+                'iv': opt_iv, 'bid': bid, 'ask': ask, 'bid_size': bid_size, 'ask_size': ask_size,
+                'open_interest': oi, 'volume': vol, 'spread_pct': spread_pct,
+                'liquidity_flag': bool(liquidity_flag)
             }
             
-            if dte > 140 and 0.70 <= delta <= 0.92: leaps_list.append(data)
-            elif dte < 100 and 0.15 <= delta <= 0.45: short_list.append(data)
+            if dte > 120 and 0.65 <= delta <= 0.95: leaps_list.append(data)
+            elif dte < 100 and 0.10 <= delta <= 0.50: short_list.append(data)
         
         print(json.dumps({
             'success': True, 'underlying_price': price, 'iv': model_iv,
-            'leaps': sorted(leaps_list, key=lambda x: abs(x['delta'] - 0.80))[:40],
-            'short': sorted(short_list, key=lambda x: abs(x['delta'] - 0.25))[:40]
+            'leaps': sorted(leaps_list, key=lambda x: abs(x['delta'] - 0.80))[:60],
+            'short': sorted(short_list, key=lambda x: abs(x['delta'] - 0.25))[:60]
         }))
         
     except Exception as e:

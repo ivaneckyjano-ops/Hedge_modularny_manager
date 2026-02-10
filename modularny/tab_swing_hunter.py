@@ -2171,7 +2171,10 @@ def refresh_trade_plan_vars(state, window, symbol, summary):
     plan_vars['strategy'].set(data.get('strategy_label', '—'))
     plan_vars['reason'].set(data.get('strategy_reason', '—'))
     plan_vars['option_strategy'].set(data.get('option_strategy', '—'))
-    plan_vars['option_reason'].set(data.get('option_reason', data.get('strategy_reason', '—')))
+    
+    # Pre PMCC sme už nastavili option_reason vyššie, nepripisovať ho znova ak už je nastavený
+    if not (data.get('option_strategy') == 'PMCC' and pmcc):
+        plan_vars['option_reason'].set(data.get('option_reason', data.get('strategy_reason', '—')))
     
     ml_prob = data.get('ml_prob')
     if ml_prob is not None:
@@ -2503,6 +2506,29 @@ def open_tws_execution_window(state, symbol, plan_vars, summary):
                 window.after(0, lambda: btn_exec.config(state='normal'))
 
         threading.Thread(target=_run_exec, daemon=True).start()
+
+    def prepare_exit():
+        """Otočí akcie nôh pre okamžitý výstup z pozície"""
+        l1_act = l1_action.get()
+        l2_act = l2_action.get()
+        l1_action.set("SELL" if l1_act == "BUY" else "BUY")
+        l2_action.set("BUY" if l2_act == "SELL" else "SELL")
+        
+        # Zmena vizuálu na EXIT režim
+        strategy_desc_var.set(f"EXIT: {strategy_desc_var.get()}")
+        strat_lbl.config(fg="white", bg="#c62828")
+        btn_exec.config(text="🚨 ODOVZDAŤ EXIT PRÍKAZ")
+        status_var.set("⚠️ REŽIM UKONČENIA POZÍCIE (EXIT)")
+        messagebox.showinfo("Emergency Exit", "Príkazy nôh boli otočené pre UKONČENIE pozície.\nSkontrolujte Limit Cenu pred odoslaním!")
+
+    # Pridanie Emergency Exit tlačidla pred hlavné odosielacie tlačidlo
+    exit_frame = ttk.Frame(main_frame)
+    exit_frame.pack(fill='x', pady=(5, 0))
+    
+    btn_exit = tk.Button(exit_frame, text="🚨 EMERGENCY EXIT (Otočiť na výstup)", 
+                         bg="#ffebee", fg="#c62828", font=('Arial', 9, 'bold'),
+                         relief='groove', command=prepare_exit)
+    btn_exit.pack(fill='x')
 
     btn_exec = ttk.Button(main_frame, text="🚀 ODOSLAŤ OBJEDNÁVKU", command=execute_order)
     btn_exec.pack(pady=10, fill='x')

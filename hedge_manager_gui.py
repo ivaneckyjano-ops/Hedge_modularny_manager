@@ -287,45 +287,48 @@ class HedgeManagerGUI:
         # === TAB 4: Portfolio Monitor ===
         tab_port = ttk.Frame(notebook)
         notebook.add(tab_port, text="📊 Monitor Portfólia")
+        
         if MODULAR_AVAILABLE:
-            try:
-                import importlib
-                import modularny.tab_monitor
-                import modularny.tab_swing_watcher
-                import modularny.tab_swing_hunter # NOVÉ
-                import modularny.tab_pmcc_hunter # NOVÉ
-                importlib.reload(modularny.tab_monitor)
-                importlib.reload(modularny.tab_swing_watcher)
-                importlib.reload(modularny.tab_swing_hunter) # NOVÉ
-                importlib.reload(modularny.tab_pmcc_hunter) # NOVÉ
-                from modularny.tab_monitor import create_monitor_tab
-                from modularny.tab_swing_watcher import create_swing_watcher_tab
-                from modularny.tab_swing_hunter import create_swing_hunter_tab # NOVÉ
-                from modularny.tab_pmcc_hunter import create_pmcc_hunter_tab # NOVÉ
-                
-                create_monitor_tab(tab_port, self.state)
-                
-                # === TAB 5: Swing Watcher ===
-                tab_swing = ttk.Frame(notebook)
-                notebook.add(tab_swing, text="📈 Swing Watcher")
-                create_swing_watcher_tab(tab_swing, self.state)
+            import importlib
+            import traceback
 
-                # === TAB 6: Swing Hunter ===
-                tab_hunter = ttk.Frame(notebook)
-                notebook.add(tab_hunter, text="🏹 Swing Hunter")
-                create_swing_hunter_tab(tab_hunter, self.state)
+            def safe_create_tab(tab_frame, tab_name, module_name, create_func_name):
+                try:
+                    mod = importlib.import_module(module_name)
+                    importlib.reload(mod)
+                    create_func = getattr(mod, create_func_name)
+                    create_func(tab_frame, self.state)
+                    return True
+                except Exception as e:
+                    error_msg = f"Chyba v tabe {tab_name}: {e}\n{traceback.format_exc()}"
+                    lbl = tk.Label(tab_frame, text=error_msg, fg="red", justify="left", wraplength=800)
+                    lbl.pack(padx=20, pady=20)
+                    print(error_msg)
+                    return False
 
-                # === TAB 7: PMCC Hunter (NOVÉ) ===
-                tab_pmcc = ttk.Frame(notebook)
-                notebook.add(tab_pmcc, text="💰 PMCC Hunter")
-                create_pmcc_hunter_tab(tab_pmcc, self.state)
-                
-            except Exception as e:
-                import traceback
-                error_msg = f"Chyba pri načítaní záložiek: {e}\n{traceback.format_exc()}"
-                lbl = tk.Label(tab_port, text=error_msg, fg="red", justify="left")
-                lbl.pack(padx=20, pady=20)
-                print(error_msg)
+            # 4. Monitor Portfólia
+            safe_create_tab(tab_port, "Monitor Portfólia", "modularny.tab_monitor", "create_monitor_tab")
+
+            # 5. Swing Watcher
+            tab_swing = ttk.Frame(notebook)
+            notebook.add(tab_swing, text="📈 Swing Watcher")
+            safe_create_tab(tab_swing, "Swing Watcher", "modularny.tab_swing_watcher", "create_swing_watcher_tab")
+
+            # 6. Swing Hunter
+            tab_hunter = ttk.Frame(notebook)
+            notebook.add(tab_hunter, text="🏹 Swing Hunter")
+            safe_create_tab(tab_hunter, "Swing Hunter", "modularny.tab_swing_hunter", "create_swing_hunter_tab")
+
+            # 7. PMCC Hunter
+            tab_pmcc = ttk.Frame(notebook)
+            notebook.add(tab_pmcc, text="💰 PMCC Hunter")
+            safe_create_tab(tab_pmcc, "PMCC Hunter", "modularny.tab_pmcc_hunter", "create_pmcc_hunter_tab")
+
+            # 8. Manažér pozícií (NOVÉ)
+            tab_tm = ttk.Frame(notebook)
+            notebook.add(tab_tm, text="📦 Manažér pozícií")
+            safe_create_tab(tab_tm, "Manažér pozícií", "modularny.tab_trade_manager", "create_trade_manager_tab")
+            
         else:
             self.create_monitor_tab(tab_port)
 

@@ -49,8 +49,13 @@ class PMCCHunterTab:
         
         self.last_pmcc_data = {} # Symbol -> Aktuálne vybratá PMCC data
         self.all_pmcc_options = {} # Symbol -> Zoznam všetkých validných PMCC kombinácií
-        self.setup_ui()
+        self.cache_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cache', 'pmcc_cache.json')
+        self.scan_session_id = 0
+        self.skipped_list = []
         
+        self.setup_ui()
+        self.load_cache()
+
     def setup_ui(self):
         # --- Horný panel s ovládaním a symbolmi ---
         top_panel = ttk.Frame(self.frame)
@@ -60,18 +65,15 @@ class PMCCHunterTab:
         sym_frame = ttk.LabelFrame(top_panel, text="📋 Zoznam symbolov (vlastný)", padding=5)
         sym_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
         
-        # Pomocný text pre užívateľa
         ttk.Label(sym_frame, text="Zadajte symboly (oddelené čiarkou, medzerou alebo novým riadkom):", font=('Arial', 7)).pack(anchor='w')
         
         self.sym_text = tk.Text(sym_frame, height=4, width=30, font=('Arial', 9), undo=True)
         self.sym_text.pack(side='left', fill='both', expand=True, pady=2)
         
-        # Scrollbar pre text
         sym_sb = ttk.Scrollbar(sym_frame, command=self.sym_text.yview)
         sym_sb.pack(side='right', fill='y')
         self.sym_text.configure(yscrollcommand=sym_sb.set)
         
-        # Načítanie počiatočných symbolov
         initial_syms = ", ".join(getattr(self.state, 'pmcc_symbols', []))
         self.sym_text.insert('1.0', initial_syms)
         self.sym_text.edit_modified(False)
@@ -81,7 +83,6 @@ class PMCCHunterTab:
         ctrl = ttk.LabelFrame(top_panel, text="⚙️ Parametre PMCC", padding=10)
         ctrl.pack(side='right', fill='both', padx=(5, 0))
         
-        # Filtre v riadkoch (vertikálne usporiadanie pre úsporu šírky)
         f_row1 = ttk.Frame(ctrl)
         f_row1.pack(fill='x', pady=1)
         ttk.Label(f_row1, text="Min Δ LEAPS:").pack(side='left')
@@ -108,8 +109,6 @@ class PMCCHunterTab:
         self.status_lbl = ttk.Label(btn_panel, textvariable=self.status_var, foreground="gray")
         self.status_lbl.pack(side='left', padx=5)
         
-        self.scan_session_id = 0
-        
         ttk.Button(btn_panel, text="🚀 OTVORIŤ V TRADE PLAN", command=self.open_in_trade_plan).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="🚀 VYHĽADAŤ PMCC", command=self.run_pmcc_scan).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="⏹️ STOP", command=self.stop_scan).pack(side='right', padx=2)
@@ -119,10 +118,9 @@ class PMCCHunterTab:
         t_frame = ttk.Frame(self.frame)
         t_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
-        cols = ('price', 'rsi', 'debit', 'c_pct', 'lev', 'mont', 'max_profit', 'be_pct', 'extrinsic', 'iv', 'yield', 'status')
+        cols = ('price', 'rsi', 'debit', 'c_pct', 'lev', 'mont', 'max_profit', 'be_pct', 'extrinsic', 'iv', 'yield', 'oi', 'liq', 'status')
         self.tree = ttk.Treeview(t_frame, columns=cols, show='tree headings')
         
-        # Skrátené názvy hlavičiek
         self.tree.heading('#0', text='Symbol', command=lambda: self.treeview_sort_column('#0', False))
         self.tree.heading('price', text='Cena/Opc', command=lambda: self.treeview_sort_column('price', False))
         self.tree.heading('rsi', text='RSI', command=lambda: self.treeview_sort_column('rsi', False))
@@ -135,22 +133,25 @@ class PMCCHunterTab:
         self.tree.heading('extrinsic', text='Ex %', command=lambda: self.treeview_sort_column('extrinsic', False))
         self.tree.heading('iv', text='IV %', command=lambda: self.treeview_sort_column('iv', False))
         self.tree.heading('yield', text='Yield %', command=lambda: self.treeview_sort_column('yield', False))
+        self.tree.heading('oi', text='OI', command=lambda: self.treeview_sort_column('oi', False))
+        self.tree.heading('liq', text='Liq', command=lambda: self.treeview_sort_column('liq', False))
         self.tree.heading('status', text='Status', command=lambda: self.treeview_sort_column('status', False))
         
-        # Nastavenie šírok (minimalizované)
-        self.tree.column('#0', width=80, anchor='w')
-        self.tree.column('price', width=90, anchor='center')
-        self.tree.column('rsi', width=45, anchor='center')
+        self.tree.column('#0', width=100, anchor='w')
+        self.tree.column('price', width=85, anchor='center')
+        self.tree.column('rsi', width=40, anchor='center')
         self.tree.column('debit', width=65, anchor='center')
-        self.tree.column('c_pct', width=50, anchor='center')
+        self.tree.column('c_pct', width=55, anchor='center')
         self.tree.column('lev', width=50, anchor='center')
-        self.tree.column('mont', width=55, anchor='center')
-        self.tree.column('max_profit', width=70, anchor='center')
+        self.tree.column('mont', width=50, anchor='center')
+        self.tree.column('max_profit', width=75, anchor='center')
         self.tree.column('be_pct', width=60, anchor='center')
-        self.tree.column('extrinsic', width=60, anchor='center')
-        self.tree.column('iv', width=60, anchor='center')
-        self.tree.column('yield', width=70, anchor='center')
-        self.tree.column('status', width=120)
+        self.tree.column('extrinsic', width=100, anchor='center')
+        self.tree.column('iv', width=75, anchor='center')
+        self.tree.column('yield', width=85, anchor='center')
+        self.tree.column('oi', width=55, anchor='center')
+        self.tree.column('liq', width=45, anchor='center')
+        self.tree.column('status', width=400, anchor='w')
 
         self.tree.bind("<Motion>", self.handle_header_tooltips)
         self.tree.bind("<Button-3>", self.show_context_menu)
@@ -164,16 +165,17 @@ class PMCCHunterTab:
             'mont': "Recovery Months (ERT) - (Extrinsic Long / Short Premium). Kolko mesiacov sa spláca časová hodnota LEAPS.",
             'max_profit': "Max Profit - Maximálny teoretický zisk ak je akcia pri expirácii na strike Short Callu.",
             'be_pct': "Break-Even % - O koľko % sa musí pohnúť akcia, aby bol obchod na nule.",
-            'extrinsic': "Extrinsic % - Pomer časovej hodnoty k celkovej cene LEAPS opcie.",
+            'extrinsic': "Extrinsic % - Pomer časovej hodnoty k celkovej pohltenej cene LEAPS opcie.",
             'iv': "Implied Volatility - Očakávaná volatilita trhom.",
             'yield': "Ročný Výnos % - Annualizovaný výnos z pravidelného vypisovania Short Callu.",
+            'oi': "Open Interest - Počet otvorených kontraktov. Vyššie = lepšia likvidita.",
+            'liq': "Liquidity flag - Rýchla heuristika (OI/Volume/Spread/BidSize) indikujúca obchodovateľnosť.",
             'status': "Aktuálny stav signálu a zóny (HUNT = Touch BB/MA200)"
         }
         
         self.tree.pack(side='left', fill='both', expand=True)
         sb = ttk.Scrollbar(t_frame, command=self.tree.yview); sb.pack(side='right', fill='y'); self.tree.configure(yscrollcommand=sb.set)
         
-        # --- Poznámka pre vynechané symboly ---
         self.skipped_frame = ttk.Frame(self.frame, padding=(10, 0))
         self.skipped_frame.pack(fill='x')
         ttk.Label(self.skipped_frame, text="Vynechané symboly (žiadna validná PMCC kombinácia):", font=('Arial', 8, 'bold')).pack(side='left')
@@ -186,79 +188,50 @@ class PMCCHunterTab:
         self.tree.tag_configure('danger', background='#ffcdd2')
         self.tree.tag_configure('child', background='#f5f5f5')
 
-    def open_in_trade_plan(self):
-        """Otvorí vybraný PMCC v okne Trade Plan pre odoslanie do TWS"""
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showwarning("PMCC Hunter", "Vyberte symbol v tabuľke.")
-            return
-            
-        parent_id = selected[0]
-        # Ak vybral dieťa, nájdeme rodiča
-        if self.tree.parent(parent_id):
-            parent_id = self.tree.parent(parent_id)
-            
-        symbol = self.tree.item(parent_id, 'text')
-        # Musíme nájsť pôvodné dáta pre tento symbol
-        pmcc_data = self.last_pmcc_data.get(symbol)
-        
+    def save_cache(self):
         try:
-            from modularny.tab_swing_hunter import open_trade_plan_window
-            # Simulujeme summary pre Trade Plan
-            summary = {
-                'symbol': symbol,
-                'price': float(self.tree.item(parent_id, 'values')[0]),
-                'option_strategy': 'PMCC', 
-                'strategy_label': 'PMCC (Poor Man\'s Covered Call)',
-                'pmcc': pmcc_data # Pridáme kompletné dáta o nohách
-            }
-            open_trade_plan_window(self.state, summary)
+            cache_dir = os.path.dirname(self.cache_file)
+            if not os.path.exists(cache_dir): os.makedirs(cache_dir)
+            
+            cache_data = {}
+            for sym, data in self.last_pmcc_data.items():
+                cache_data[sym] = {
+                    'data': data,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'all_options': self.all_pmcc_options.get(sym, [])
+                }
+            
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=4)
         except Exception as e:
-            messagebox.showerror("Chyba", f"Nepodarilo sa otvoriť Trade Plan: {e}")
+            print(f"❌ Chyba pri ukladaní PMCC cache: {e}")
 
-    def sync_from_hunter(self):
-        """Získa symboly zo Swing Huntera, ktoré majú býčí signál"""
-        summaries = getattr(self.state, 'hunter_symbol_summaries', {})
-        bullish_syms = []
-        for sym, data in summaries.items():
-            # Filter: Cena > MA200 a RSI nie je prekúpené (pod 70)
-            price = data.get('price', 0)
-            ma200 = data.get('ma200_value')
-            rsi = data.get('rsi', 50)
-            
-            if ma200 and price > ma200 and rsi < 65:
-                bullish_syms.append(sym)
-        
-        if not bullish_syms:
-            messagebox.showinfo("PMCC Hunter", "Žiadne nové býčie signály v Swing Hunteri.")
-            return
-            
-        messagebox.showinfo("PMCC Hunter", f"Nájdených {len(bullish_syms)} býčích symbolov: {', '.join(bullish_syms)}")
-        self.run_pmcc_scan(bullish_syms)
-
-    def stop_scan(self):
-        """Okamžite zastaví bežiaci sken a procesy"""
-        self.scan_session_id += 1
+    def load_cache(self):
+        if not os.path.exists(self.cache_file): return
         try:
-            subprocess.run(['pkill', '-f', 'tws_fetch_pmcc_options.py'], capture_output=True)
-        except: pass
-        self.status_var.set("⏹️ ZASTAVENÉ")
-        self.status_lbl.config(foreground="red")
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+                for sym, entry in cache_data.items():
+                    data = entry['data']
+                    self.last_pmcc_data[sym] = data
+                    self.all_pmcc_options[sym] = entry.get('all_options', [])
+                    ts = entry.get('timestamp', 'Neznámy čas')
+                    # Neupravujeme priamo status v dátach, len v zobrazení
+                    display_data = data.copy()
+                    display_data['status'] = f"{data['status']} (zo dňa {ts})"
+                    self.add_to_tree(display_data)
+        except Exception as e:
+            print(f"❌ Chyba pri načítaní PMCC cache: {e}")
 
     def on_symbols_text_changed(self, event=None):
-        """Uloží zmenený zoznam symbolov z Text widgetu"""
         if not self.sym_text.edit_modified():
             return
             
         raw = self.sym_text.get('1.0', tk.END)
-        # Rozdelíme podľa čiarky, medzery alebo nového riadku
         syms = [s.strip().upper() for s in raw.replace(',', ' ').replace('\n', ' ').split() if s.strip()]
         self.state.pmcc_symbols = syms
-        
-        # Reset modified flagu, aby sme zachytili ďalšiu zmenu
         self.sym_text.edit_modified(False)
         
-        # Uložíme do súboru (asynchrónne s oneskorením)
         if not hasattr(self, '_save_timer') or self._save_timer is None:
             self._save_timer = self.parent.after(2000, self._delayed_save)
 
@@ -266,11 +239,12 @@ class PMCCHunterTab:
         self.state.save_settings_file()
         self._save_timer = None
 
-    def run_pmcc_scan(self, forced_symbols=None):
-        if forced_symbols:
+    def run_pmcc_scan(self, forced_symbols=None, full_scan_single=None):
+        if full_scan_single:
+            symbols = [full_scan_single]
+        elif forced_symbols:
             symbols = forced_symbols
         else:
-            # Použijeme vlastný zoznam z Text poľa
             raw = self.sym_text.get('1.0', tk.END)
             symbols = [s.strip().upper() for s in raw.replace(',', ' ').replace('\n', ' ').split() if s.strip()]
             
@@ -281,17 +255,16 @@ class PMCCHunterTab:
         self.scan_session_id += 1
         session_id = self.scan_session_id
         
-        self.status_var.set("🔍 SKENUJEM OPCIE...")
+        self.status_var.set(f"🔍 SKENUJEM {'(FULL)' if full_scan_single else ''}...")
         self.status_lbl.config(foreground="blue")
-        self.tree.delete(*self.tree.get_children())
-        self.skipped_var.set("—")
-        self.skipped_list = []
         
-        # --- NOVÉ: Spustíme prioritný sken v Swing Hunteri pre tieto symboly ---
+        if not full_scan_single:
+            self.tree.delete(*self.tree.get_children())
+            self.skipped_var.set("—")
+            self.skipped_list = []
+        
         try:
             from modularny.tab_swing_hunter import refresh_hunter
-            # Spustíme refresh v Swing Hunteri (ten už vie, že PMCC symboly majú prioritu)
-            # Voláme to v after(0), aby sme neblokovali UI vlákno
             self.parent.after(0, lambda: refresh_hunter(
                 self.state, 
                 getattr(self.state, 'hunter_tree'), 
@@ -315,7 +288,6 @@ class PMCCHunterTab:
             max_spr = float(self.max_spread.get()) / 100.0
             
             for sym in symbols:
-                # Kontrola či už nebeží novšia session
                 if self.scan_session_id != session_id:
                     return
 
@@ -330,12 +302,10 @@ class PMCCHunterTab:
                         else:
                             self.skipped_list.append(f"{sym} ({data.get('error')})")
                     except Exception as e:
-                        print(f"Error parsing JSON for {sym}: {e}")
                         self.skipped_list.append(sym)
                 else:
                     self.skipped_list.append(sym)
                 
-                # Aktualizovať zoznam vynechaných v reálnom čase
                 self.parent.after(0, lambda: self.skipped_var.set(", ".join(self.skipped_list) if self.skipped_list else "—"))
                 time.sleep(0.5)
                 
@@ -352,7 +322,6 @@ class PMCCHunterTab:
         price = data.get('underlying_price', 0)
         iv = data.get('iv', 0)
         
-        # Získame info zo Swing Huntera
         hunter_data = getattr(self.state, 'hunter_symbol_summaries', {}).get(symbol, {})
         is_buying_zone = hunter_data.get('zone') == 'hunt'
         rsi = hunter_data.get('rsi', 0)
@@ -370,7 +339,7 @@ class PMCCHunterTab:
 
         for l in leaps:
             if l['delta'] < min_delta_l: continue
-            if l['spread_pct'] > max_spread: continue
+            if l['bid'] > 0 and l['ask'] > 0 and l['spread_pct'] > max_spread: continue
             
             intrinsic = max(0, price - l['strike'])
             extrinsic = l['price'] - intrinsic
@@ -392,19 +361,9 @@ class PMCCHunterTab:
                 be_pct = ((be_price - price) / price) * 100
                 
                 score = (100 - ext_pct) + (s['theta'] * -10)
-                
-                # Ročný výnos (Yield) z Short Call nájomného
-                # Formula: (Premium / Debit) * (365 / DTE)
                 ann_yield = (s['price'] / net_debit) * (365 / s['dte']) * 100 if net_debit > 0 and s['dte'] > 0 else 0
-                
-                # NOVÉ METRIKY:
-                # 1. Cushion_Ratio (%)
                 cushion = (s['price'] / net_debit) * 100 if net_debit > 0 else 0
-                
-                # 2. Leverage Quality (Net_Debit / Current_Stock_Price)
                 lev_quality = net_debit / price if price > 0 else 0
-                
-                # 3. Recovery Months (ERT)
                 recovery = extrinsic / s['price'] if s['price'] > 0 else 0
                 
                 valid_pmccs.append({
@@ -428,16 +387,18 @@ class PMCCHunterTab:
                     'yield': f"{ann_yield:.1f}%",
                     'status': status,
                     'score': score,
-                    'is_danger': cushion < 3.0 or rsi > 70
+                    'is_danger': cushion < 3.0 or rsi > 70,
+                    'oi': int(s.get('open_interest', 0) or 0),
+                    'liq': bool(l.get('liquidity_flag', False) and s.get('liquidity_flag', False))
                 })
         
         if valid_pmccs:
-            # Vyberieme najlepší podľa score
             valid_pmccs.sort(key=lambda x: x['score'], reverse=True)
             self.all_pmcc_options[symbol] = valid_pmccs
             best = valid_pmccs[0]
             self.last_pmcc_data[symbol] = best
             self.parent.after(0, lambda: self.add_to_tree(best))
+            self.save_cache()
         else:
             self.skipped_list.append(f"{symbol} ({skip_reason})")
             self.parent.after(0, lambda: self.skipped_var.set(", ".join(self.skipped_list)))
@@ -447,44 +408,58 @@ class PMCCHunterTab:
         try:
             ext = float(p['extrinsic'].replace('%',''))
             be = float(p['be_pct'].replace('%','').replace('+',''))
-            
             if p.get('is_danger'): tag = 'danger'
             elif ext < 5.0 and be < 2.0: tag = 'ideal'
             elif "BUY ZONE" in p['status']: tag = 'ideal'
             elif ext > 10.0: tag = 'warning'
         except: pass
         
-        # Skontrolujeme, či už symbol v tabuľke je (ak áno, vymažeme ho a nahradíme)
         for item in self.tree.get_children(''):
             if self.tree.item(item, 'text') == p['symbol']:
                 self.tree.delete(item)
                 break
 
-        # Rodičovský riadok
         parent_id = self.tree.insert('', tk.END, text=p['symbol'], values=(
             p['price'], p['rsi'], p['debit'], p['c_pct'], p['lev'], p['mont'], 
-            p['max_profit'], p['be_pct'], p['extrinsic'], p['iv'], p['yield'], p['status']
+            p['max_profit'], p['be_pct'], p['extrinsic'], p['iv'], p['yield'], p.get('oi','—'), ('✅' if p.get('liq') else '⚠️'), p['status']
         ), tags=(tag,) if tag else ())
         
-        # Detailné riadky (dieťa)
+        l = p.get('leaps_data', {})
+        l_bid = f"{l.get('bid', 0):.2f}" if l.get('bid', 0) else "—"
+        l_ask = f"{l.get('ask', 0):.2f}" if l.get('ask', 0) else "—"
+        l_spread = f"{l.get('spread_pct', 0)*100:.1f}%" if l.get('spread_pct', 0) < 1.0 else "—"
         self.tree.insert(parent_id, tk.END, text="  Leg 1", values=(
-            p['leaps_price'], p['leaps_txt'], "", "", "", "", "", "", "", "", "", ""
-        ), tags=('child',))
-        self.tree.insert(parent_id, tk.END, text="  Leg 2", values=(
-            p['short_price'], p['short_txt'], "", "", "", "", "", "", "", "", "", ""
+            p['leaps_price'], "", "", "", "", "", "", "", f"{l_bid}/{l_ask}", f"{l_spread}", "", 
+            str(int(l.get('open_interest', 0) or 0)), ('✅' if l.get('liquidity_flag') else '⚠️'), p['leaps_txt']
         ), tags=('child',))
         
-        # Automaticky neotvárať (ponechať zatvorené pre prehľadnosť)
+        l_iv = f"{l.get('iv', 0)*100:.1f}%" if l.get('iv', 0) else "—"
+        self.tree.insert(parent_id, tk.END, text="    Greeks", values=(
+            "", "", "", "", "", "", "", "", "", l_iv, f"Δ {l.get('delta', 0):.2f}", 
+            "", "", f"Theta: {l.get('theta', 0):.3f}"
+        ), tags=('child',))
+
+        s = p.get('short_data', {})
+        s_bid = f"{s.get('bid', 0):.2f}" if s.get('bid', 0) else "—"
+        s_ask = f"{s.get('ask', 0):.2f}" if s.get('ask', 0) else "—"
+        s_spread = f"{s.get('spread_pct', 0)*100:.1f}%" if s.get('spread_pct', 0) < 1.0 else "—"
+        self.tree.insert(parent_id, tk.END, text="  Leg 2", values=(
+            p['short_price'], "", "", "", "", "", "", "", f"{s_bid}/{s_ask}", f"{s_spread}", "", 
+            str(int(s.get('open_interest', 0) or 0)), ('✅' if s.get('liquidity_flag') else '⚠️'), p['short_txt']
+        ), tags=('child',))
+
+        s_iv = f"{s.get('iv', 0)*100:.1f}%" if s.get('iv', 0) else "—"
+        self.tree.insert(parent_id, tk.END, text="    Greeks", values=(
+            "", "", "", "", "", "", "", "", "", s_iv, f"Δ {s.get('delta', 0):.2f}", 
+            "", "", f"Theta: {s.get('theta', 0):.3f}"
+        ), tags=('child',))
+        
         self.tree.item(parent_id, open=False)
 
     def treeview_sort_column(self, col, reverse):
-        """Usporiada tabuľku podľa kliknutého stĺpca (len rodičovské riadky)"""
         l = []
-        # Získame len rodičovské riadky (tie, ktoré nemajú rodiča v treeview)
         for k in self.tree.get_children(''):
             val = self.tree.set(k, col) if col != '#0' else self.tree.item(k, 'text')
-            
-            # Prevod na číslo pre správne radenie (ak je to možné)
             clean_val = val
             if isinstance(val, str):
                 clean_val = val.replace('%', '').replace('$', '').replace('+', '').replace('—', '-1').strip()
@@ -492,32 +467,22 @@ class PMCCHunterTab:
                     clean_val = float(clean_val)
                 except ValueError:
                     clean_val = val.lower()
-            
             l.append((clean_val, k))
-
-        # Usporiadame zoznam
         l.sort(reverse=reverse, key=lambda x: x[0])
-
-        # Presunieme položky v Treeview (len rodičov, deti ostanú pri nich)
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
-
-        # Zmeníme smer radenia pre ďalšie kliknutie
         self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
 
     def handle_header_tooltips(self, event):
-        """Detekuje pohyb myši nad hlavičkou a zobrazí správny tooltip"""
         region = self.tree.identify_region(event.x, event.y)
         if region == "heading":
             column = self.tree.identify_column(event.x)
-            # column je vo formáte '#0', '#1', '#2'...
             try:
                 col_id = self.tree["columns"][int(column[1:]) - 1] if column != '#0' else None
                 if col_id and col_id in self.header_tooltips:
                     text = self.header_tooltips[col_id]
                     if not hasattr(self, '_current_tip_text') or self._current_tip_text != text:
                         self._current_tip_text = text
-                        # Zobrazenie tooltipu pomocou dočasného Labelu
                         self.show_header_tip(event.x_root, event.y_root, text)
                 else:
                     self.hide_header_tip()
@@ -540,18 +505,26 @@ class PMCCHunterTab:
             self._current_tip_text = None
 
     def show_context_menu(self, event):
-        """Zobrazí kontextové menu po kliknutí pravým tlačidlom"""
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
             menu = tk.Menu(self.parent, tearoff=0)
+            menu.add_command(label="🔄 VELKÝ SKEN (Len tento symbol)", command=self.run_single_full_scan)
+            menu.add_separator()
             menu.add_command(label="🎯 ZMENIŤ STRIKE (Simulátor)", command=self.open_strike_simulator)
             menu.add_separator()
             menu.add_command(label="🚀 OTVORIŤ V TRADE PLAN", command=self.open_in_trade_plan)
             menu.post(event.x_root, event.y_root)
 
+    def run_single_full_scan(self):
+        selected = self.tree.selection()
+        if not selected: return
+        parent_id = selected[0]
+        if self.tree.parent(parent_id): parent_id = self.tree.parent(parent_id)
+        symbol = self.tree.item(parent_id, 'text')
+        self.run_pmcc_scan(full_scan_single=symbol)
+
     def open_strike_simulator(self):
-        """Otvorí okno pre výber inej kombinácie (Short Striku)"""
         selected = self.tree.selection()
         if not selected: return
         
@@ -564,7 +537,6 @@ class PMCCHunterTab:
             messagebox.showinfo("Simulátor", f"Pre {symbol} nie sú k dispozícii iné kombinácie.")
             return
 
-        # Vytvorenie dialógového okna
         win = tk.Toplevel(self.parent)
         win.title(f"🎯 Simulátor Striku - {symbol}")
         win.geometry("800x400")
@@ -573,7 +545,6 @@ class PMCCHunterTab:
 
         ttk.Label(win, text=f"Vyberte inú kombináciu pre {symbol}:", font=('Arial', 10, 'bold')).pack(pady=10)
 
-        # Tabuľka možností - rozšírená o expirácie a prémiu
         cols = ('short_exp', 'short_strike', 'premium', 'long_exp', 'long_strike', 'c_pct', 'mont', 'debit', 'profit')
         stree = ttk.Treeview(win, columns=cols, show='headings', height=12)
         
@@ -593,23 +564,14 @@ class PMCCHunterTab:
         
         stree.pack(fill='both', expand=True, padx=10)
 
-        # Naplnenie dátami
         for i, o in enumerate(options):
             tag = 'danger' if o.get('is_danger') else ''
-            # Formátovanie expirácie: "YYYY-MM-DD (DTE d)"
             s_exp = f"{o['short_data']['expiry']} ({o['short_data']['dte']}d)"
             l_exp = f"{o['leaps_data']['expiry']} ({o['leaps_data']['dte']}d)"
             
             stree.insert('', tk.END, iid=str(i), values=(
-                s_exp,
-                o['short_data']['strike'],
-                o['short_price'],
-                l_exp,
-                o['leaps_data']['strike'],
-                o['c_pct'],
-                o['mont'],
-                o['debit'],
-                o['max_profit']
+                s_exp, o['short_data']['strike'], o['short_price'], l_exp, o['leaps_data']['strike'],
+                o['c_pct'], o['mont'], o['debit'], o['max_profit']
             ), tags=(tag,))
         
         stree.tag_configure('danger', foreground='red')
@@ -619,13 +581,60 @@ class PMCCHunterTab:
             if not sel: return
             idx = int(sel[0])
             chosen = options[idx]
-            
-            # Aktualizácia dát a tabuľky
             self.last_pmcc_data[symbol] = chosen
             self.add_to_tree(chosen)
             win.destroy()
 
         ttk.Button(win, text="✅ POUŽIŤ TÚTO KOMBINÁCIU", command=select).pack(pady=10)
+
+    def stop_scan(self):
+        self.scan_session_id += 1
+        try:
+            subprocess.run(['pkill', '-f', 'tws_fetch_pmcc_options.py'], capture_output=True)
+        except: pass
+        self.status_var.set("⏹️ ZASTAVENÉ")
+        self.status_lbl.config(foreground="red")
+
+    def open_in_trade_plan(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("PMCC Hunter", "Vyberte symbol v tabuľke.")
+            return
+            
+        parent_id = selected[0]
+        if self.tree.parent(parent_id):
+            parent_id = self.tree.parent(parent_id)
+            
+        symbol = self.tree.item(parent_id, 'text')
+        pmcc_data = self.last_pmcc_data.get(symbol)
+        
+        try:
+            from modularny.tab_swing_hunter import open_trade_plan_window
+            summary = {
+                'symbol': symbol,
+                'price': float(self.tree.item(parent_id, 'values')[0]),
+                'option_strategy': 'PMCC', 
+                'strategy_label': 'PMCC (Poor Man\'s Covered Call)',
+                'pmcc': pmcc_data
+            }
+            open_trade_plan_window(self.state, summary)
+        except Exception as e:
+            messagebox.showerror("Chyba", f"Nepodarilo sa otvoriť Trade Plan: {e}")
+
+    def sync_from_hunter(self):
+        summaries = getattr(self.state, 'hunter_symbol_summaries', {})
+        bullish_syms = []
+        for sym, data in summaries.items():
+            price = data.get('price', 0)
+            ma200 = data.get('ma200_value')
+            rsi = data.get('rsi', 50)
+            if ma200 and price > ma200 and rsi < 65:
+                bullish_syms.append(sym)
+        if not bullish_syms:
+            messagebox.showinfo("PMCC Hunter", "Žiadne nové býčie signály v Swing Hunteri.")
+            return
+        messagebox.showinfo("PMCC Hunter", f"Nájdených {len(bullish_syms)} býčích symbolov: {', '.join(bullish_syms)}")
+        self.run_pmcc_scan(bullish_syms)
 
 def create_pmcc_hunter_tab(parent, state):
     return PMCCHunterTab(parent, state)
