@@ -52,51 +52,68 @@ class PMCCHunterTab:
         self.setup_ui()
         
     def setup_ui(self):
-        # --- Ovládací panel ---
-        ctrl = ttk.LabelFrame(self.frame, text="⚙️ Parametre PMCC", padding=10)
-        ctrl.pack(fill='x', padx=10, pady=5)
+        # --- Horný panel s ovládaním a symbolmi ---
+        top_panel = ttk.Frame(self.frame)
+        top_panel.pack(fill='x', padx=10, pady=5)
         
-        # Riadok 0: Vlastný zoznam symbolov
-        row0 = ttk.Frame(ctrl)
-        row0.pack(fill='x', pady=2)
-        ttk.Label(row0, text="Zoznam symbolov (vlastný):").pack(side='left', padx=5)
+        # 1. SEKCIÁ SYMBOLY (vľavo)
+        sym_frame = ttk.LabelFrame(top_panel, text="📋 Zoznam symbolov (vlastný)", padding=5)
+        sym_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
         
+        # Pomocný text pre užívateľa
+        ttk.Label(sym_frame, text="Zadajte symboly (oddelené čiarkou, medzerou alebo novým riadkom):", font=('Arial', 7)).pack(anchor='w')
+        
+        self.sym_text = tk.Text(sym_frame, height=4, width=30, font=('Arial', 9), undo=True)
+        self.sym_text.pack(side='left', fill='both', expand=True, pady=2)
+        
+        # Scrollbar pre text
+        sym_sb = ttk.Scrollbar(sym_frame, command=self.sym_text.yview)
+        sym_sb.pack(side='right', fill='y')
+        self.sym_text.configure(yscrollcommand=sym_sb.set)
+        
+        # Načítanie počiatočných symbolov
         initial_syms = ", ".join(getattr(self.state, 'pmcc_symbols', []))
-        self.pmcc_symbols_var = tk.StringVar(value=initial_syms)
-        self.pmcc_symbols_entry = ttk.Entry(row0, textvariable=self.pmcc_symbols_var)
-        self.pmcc_symbols_entry.pack(side='left', fill='x', expand=True, padx=5)
-        self.pmcc_symbols_var.trace_add('write', self.on_symbols_changed)
+        self.sym_text.insert('1.0', initial_syms)
+        self.sym_text.edit_modified(False)
+        self.sym_text.bind('<<Modified>>', self.on_symbols_text_changed)
 
-        # Riadok 1: Filtre
-        row1 = ttk.Frame(ctrl)
-        row1.pack(fill='x', pady=2)
+        # 2. SEKCIA PARAMETRE (vpravo)
+        ctrl = ttk.LabelFrame(top_panel, text="⚙️ Parametre PMCC", padding=10)
+        ctrl.pack(side='right', fill='both', padx=(5, 0))
         
-        ttk.Label(row1, text="Min Delta LEAPS:").pack(side='left', padx=5)
+        # Filtre v riadkoch (vertikálne usporiadanie pre úsporu šírky)
+        f_row1 = ttk.Frame(ctrl)
+        f_row1.pack(fill='x', pady=1)
+        ttk.Label(f_row1, text="Min Δ LEAPS:").pack(side='left')
         self.min_delta_leaps = tk.StringVar(value="0.75")
-        ttk.Entry(row1, textvariable=self.min_delta_leaps, width=6).pack(side='left', padx=2)
-        
-        ttk.Label(row1, text="Max Delta Short:").pack(side='left', padx=(15, 5))
+        ttk.Entry(f_row1, textvariable=self.min_delta_leaps, width=6).pack(side='right')
+
+        f_row2 = ttk.Frame(ctrl)
+        f_row2.pack(fill='x', pady=1)
+        ttk.Label(f_row2, text="Max Δ Short:").pack(side='left')
         self.max_delta_short = tk.StringVar(value="0.30")
-        ttk.Entry(row1, textvariable=self.max_delta_short, width=6).pack(side='left', padx=2)
-        
-        ttk.Label(row1, text="Max Spread LEAPS (%):").pack(side='left', padx=(15, 5))
+        ttk.Entry(f_row2, textvariable=self.max_delta_short, width=6).pack(side='right')
+
+        f_row3 = ttk.Frame(ctrl)
+        f_row3.pack(fill='x', pady=1)
+        ttk.Label(f_row3, text="Max Spread %:").pack(side='left')
         self.max_spread = tk.StringVar(value="3.0")
-        ttk.Entry(row1, textvariable=self.max_spread, width=6).pack(side='left', padx=2)
+        ttk.Entry(f_row3, textvariable=self.max_spread, width=6).pack(side='right')
         
-        # Riadok 2: Tlačidlá
-        row2 = ttk.Frame(ctrl)
-        row2.pack(fill='x', pady=5)
+        # --- Riadok s tlačidlami pod horným panelom ---
+        btn_panel = ttk.Frame(self.frame)
+        btn_panel.pack(fill='x', padx=10, pady=2)
         
         self.status_var = tk.StringVar(value="Pripravený")
-        self.status_lbl = ttk.Label(row2, textvariable=self.status_var, foreground="gray")
+        self.status_lbl = ttk.Label(btn_panel, textvariable=self.status_var, foreground="gray")
         self.status_lbl.pack(side='left', padx=5)
         
         self.scan_session_id = 0
         
-        ttk.Button(row2, text="🚀 OTVORIŤ V TRADE PLAN", command=self.open_in_trade_plan).pack(side='right', padx=5)
-        ttk.Button(row2, text="🚀 VYHĽADAŤ PMCC PRÍLEŽITOSTI", command=self.run_pmcc_scan).pack(side='right', padx=5)
-        ttk.Button(row2, text="⏹️ STOP", command=self.stop_scan).pack(side='right', padx=5)
-        ttk.Button(row2, text="🔄 Sync zo Swing Huntera", command=self.sync_from_hunter).pack(side='right', padx=5)
+        ttk.Button(btn_panel, text="🚀 OTVORIŤ V TRADE PLAN", command=self.open_in_trade_plan).pack(side='right', padx=2)
+        ttk.Button(btn_panel, text="🚀 VYHĽADAŤ PMCC", command=self.run_pmcc_scan).pack(side='right', padx=2)
+        ttk.Button(btn_panel, text="⏹️ STOP", command=self.stop_scan).pack(side='right', padx=2)
+        ttk.Button(btn_panel, text="🔄 Sync zo Swing Huntera", command=self.sync_from_hunter).pack(side='right', padx=2)
 
         # --- Tabuľka výsledkov ---
         t_frame = ttk.Frame(self.frame)
@@ -228,13 +245,20 @@ class PMCCHunterTab:
         self.status_var.set("⏹️ ZASTAVENÉ")
         self.status_lbl.config(foreground="red")
 
-    def on_symbols_changed(self, *args):
-        """Uloží zmenený zoznam symbolov do state"""
-        raw = self.pmcc_symbols_var.get()
-        # Rozdelíme podľa čiarky alebo medzery
-        syms = [s.strip().upper() for s in raw.replace(',', ' ').split() if s.strip()]
+    def on_symbols_text_changed(self, event=None):
+        """Uloží zmenený zoznam symbolov z Text widgetu"""
+        if not self.sym_text.edit_modified():
+            return
+            
+        raw = self.sym_text.get('1.0', tk.END)
+        # Rozdelíme podľa čiarky, medzery alebo nového riadku
+        syms = [s.strip().upper() for s in raw.replace(',', ' ').replace('\n', ' ').split() if s.strip()]
         self.state.pmcc_symbols = syms
-        # Uložíme do súboru (asynchrónne, aby to nesekalo pri písaní)
+        
+        # Reset modified flagu, aby sme zachytili ďalšiu zmenu
+        self.sym_text.edit_modified(False)
+        
+        # Uložíme do súboru (asynchrónne s oneskorením)
         if not hasattr(self, '_save_timer') or self._save_timer is None:
             self._save_timer = self.parent.after(2000, self._delayed_save)
 
@@ -246,9 +270,9 @@ class PMCCHunterTab:
         if forced_symbols:
             symbols = forced_symbols
         else:
-            # Použijeme vlastný zoznam z Entry poľa
-            raw = self.pmcc_symbols_var.get()
-            symbols = [s.strip().upper() for s in raw.replace(',', ' ').split() if s.strip()]
+            # Použijeme vlastný zoznam z Text poľa
+            raw = self.sym_text.get('1.0', tk.END)
+            symbols = [s.strip().upper() for s in raw.replace(',', ' ').replace('\n', ' ').split() if s.strip()]
             
         if not symbols:
             messagebox.showwarning("PMCC Hunter", "Zadajte aspoň jeden symbol do poľa 'Zoznam symbolov'.")
