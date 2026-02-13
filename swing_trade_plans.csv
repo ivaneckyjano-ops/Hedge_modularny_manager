@@ -20,3 +20,4 @@ Timestamp,Symbol,Entry,SL,TP1,TP2,R_R,Action,Strategy,Reason,OptionStrategy,Opti
 2026-02-06T19:53:19.081695,PFE,27.14,26.73,27.55,28.10,1.00:1,—,PMCC (Poor Man's Covered Call),—,PMCC,—
 2026-02-06T19:53:55.137961,FCNCA,2176.43,2143.78,2209.08,2253.26,1.00:1,—,PMCC (Poor Man's Covered Call),—,PMCC,—
 2026-02-06T19:57:25.098772,LLY,1043.15,1027.50,1058.80,1079.97,1.00:1,—,PMCC (Poor Man's Covered Call),—,PMCC,—
+2026-02-09T17:12:33.534394,PYPL,41.22,37.77,41.37,56.66,0.04:1,Sledovať rezistenciu,Watch & Wait,Hold • Bear • %B 34%,Bear call spread,BEAR trend – hrať rezistenciu

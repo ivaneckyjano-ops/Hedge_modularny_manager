@@ -731,6 +731,88 @@ def calculate_atr(candles, period=14):
     atr = sum(trs[-period:]) / period
     return atr
 
+def calculate_adx_dmi(candles, period=14):
+    """
+    Vypočíta ADX, +DI a -DI (Average Directional Index).
+    Standardná perióda je 14.
+    """
+    if len(candles) < period * 2: # Potrebujeme aspoň 2x periódu pre vyhladenie
+        return 0.0, 0.0, 0.0
+
+    trs = []
+    p_dms = [] # +DM
+    m_dms = [] # -DM
+
+    for i in range(1, len(candles)):
+        curr = candles[i]
+        prev = candles[i-1]
+        
+        # TR
+        tr = max(curr['high'] - curr['low'], 
+                 abs(curr['high'] - prev['close']), 
+                 abs(curr['low'] - prev['close']))
+        trs.append(tr)
+        
+        # DM
+        move_up = curr['high'] - prev['high']
+        move_down = prev['low'] - curr['low']
+        
+        if move_up > move_down and move_up > 0:
+            p_dms.append(move_up)
+        else:
+            p_dms.append(0)
+            
+        if move_down > move_up and move_down > 0:
+            m_dms.append(move_down)
+        else:
+            m_dms.append(0)
+
+    # Wilder's Smoothing
+    def smooth(data, p):
+        if len(data) < p: return []
+        smoothed = [sum(data[:p])]
+        for i in range(p, len(data)):
+            # Wilder's smoothing formula: (prev * (n-1) + curr)
+            # Alebo jednoducho EMA s alpha=1/n
+            val = smoothed[-1] - (smoothed[-1] / p) + data[i]
+            smoothed.append(val)
+        return smoothed
+
+    s_tr = smooth(trs, period)
+    s_pdm = smooth(p_dms, period)
+    s_mdm = smooth(m_dms, period)
+
+    if not s_tr: return 0.0, 0.0, 0.0
+
+    plus_di = []
+    minus_di = []
+    dx_list = []
+
+    for i in range(len(s_tr)):
+        tr_val = s_tr[i]
+        p_di = 100 * (s_pdm[i] / tr_val) if tr_val > 0 else 0
+        m_di = 100 * (s_mdm[i] / tr_val) if tr_val > 0 else 0
+        
+        plus_di.append(p_di)
+        minus_di.append(m_di)
+        
+        diff = abs(p_di - m_di)
+        total = p_di + m_di
+        dx = 100 * (diff / total) if total > 0 else 0
+        dx_list.append(dx)
+
+    # ADX je vyhladený priemer DX
+    if len(dx_list) < period:
+        return plus_di[-1], minus_di[-1], 0.0
+
+    # Prvé ADX je priemer prvých 'period' DX hodnôt
+    adx_list = [sum(dx_list[:period]) / period]
+    for i in range(period, len(dx_list)):
+        val = (adx_list[-1] * (period - 1) + dx_list[i]) / period
+        adx_list.append(val)
+
+    return plus_di[-1], minus_di[-1], adx_list[-1]
+
 # --- PIVOT POINTS ---
 
 def get_pivot_distance(price, pivots):
@@ -955,6 +1037,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                             # --- SMART FILTER ---
                             # 1. RSI
                             d_rsi = calculate_rsi(day_candles, 14)
+                            d_pdi, d_mdi, d_adx = calculate_adx_dmi(day_candles, 14)
                             # 2. Bollinger Middle (SMA20)
                             d_bb = calculate_bb(day_candles)
                             d_ma20 = d_bb['mid'] if d_bb else None
@@ -1008,6 +1091,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
             if day_candles:
                  # Vypočítame indikátory pre 1 day
                  d_rsi = calculate_rsi(day_candles, rsi_p_val)
+                 d_pdi, d_mdi, d_adx = calculate_adx_dmi(day_candles, 14)
                  d_rvi, d_rvi_s = calculate_rvi(day_candles, rvi_p_val)
                  d_bb = calculate_bb(day_candles)
                  d_macd = calculate_macd(day_candles)
@@ -1021,6 +1105,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                  
                  results_tf['1 day'] = {
                      'rsi': d_rsi, 'rvi': d_rvi, 'rvi_s': d_rvi_s, 
+                     'adx': d_adx, 'pdi': d_pdi, 'mdi': d_mdi,
                      'price': day_candles[-1]['close'], 
                      'status': d_status, 'action': d_action, 'tag': d_tag,
                      'bb': d_bb, 'macd': d_macd,
@@ -1059,6 +1144,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                                     r_p, rv_p = rsi_p_val, rvi_p_val
                                     
                                     rsi = calculate_rsi(c, r_p)
+                                    pdi, mdi, adx = calculate_adx_dmi(c, 14)
                                     rvi, rvi_s = calculate_rvi(c, rv_p)
                                     
                                     # NOVÉ: Bollinger a MACD
@@ -1086,6 +1172,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
 
                                     results_tf[tf] = {
                                         'rsi': rsi, 'rvi': rvi, 'rvi_s': rvi_s, 
+                                        'adx': adx, 'pdi': pdi, 'mdi': mdi,
                                         'price': c[-1]['close'], 
                                         'status': tf_status, 'action': tf_action, 'tag': tf_tag,
                                         'bb': bb_data, 'macd': macd_data,
@@ -1359,6 +1446,9 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 'macd': main_macd,
                 'atr': atr_value,
                 'rsi': main_data['rsi'],
+                'adx': main_data.get('adx', 0.0),
+                'pdi': main_data.get('pdi', 0.0),
+                'mdi': main_data.get('mdi', 0.0),
                 'rvi': main_data['rvi'],
                 'rvi_s': main_data['rvi_s'],
                 'breakdown': breakdown_text,
@@ -1399,17 +1489,25 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 # Zobrazenie skóre v stĺpci RSI rodiča (upravíme Treeview neskôr)
                 ml_prob = curr_summary.get('ml_prob')
                 ml_text = f"{ml_prob*100:.0f}%" if isinstance(ml_prob, (int, float)) else "—"
+                
+                # Zobrazenie stratégie v stĺpci Akcia pre rodiča
+                opt_strat = curr_summary.get('option_strategy', '—')
+                parent_action = ac
+                if opt_strat and opt_strat != '—':
+                    parent_action = f"{ac} | {opt_strat}"
+
                 vals = (
                     f"{p:.2f}",
                     trend_val,
                     sc_text,
+                    f"{main_data_param.get('adx', 0):.1f}",
                     pct_b_cell,
                     next_up,
                     f"{main_data_param['rvi']:.4f}",
                     f"{main_data_param['rvi_s']:.4f}",
                     pivot_bb,
                     st,
-                    ac,
+                    parent_action,
                     ml_text,
                     bk_text,
                     pl_disc
@@ -1439,6 +1537,14 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                 # Aktualizovať deti (Timeframy)
                 for child in tree.get_children(parent_id):
                     tree.delete(child)
+
+                # Pridať detský riadok so stratégiou
+                opt_strat = curr_summary.get('option_strategy', '—')
+                opt_reason = curr_summary.get('option_reason', '—')
+                if opt_strat and opt_strat != '—':
+                    tree.insert(parent_id, tk.END, text="  🎯 Stratégia",
+                                values=("", "", "", "", "", "", "", "", "", opt_strat, opt_reason, "", "", ""),
+                                tags=('header',))
                 
                 for tf_name in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]:
                     if tf_name in res_tf:
@@ -1473,6 +1579,7 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                                         "",
                                         trend_letter,
                                         f"{d['rsi']:.1f}",
+                                        f"{d.get('adx', 0):.1f}",
                                         bb_value,
                                         "",
                                         f"{d['rvi']:.4f}",
@@ -1609,6 +1716,44 @@ def create_swing_hunter_tab(parent, state):
     # Panel pre symboly
     s_frame = ttk.LabelFrame(frame, text="🎯 Sledované symboly", padding=10); s_frame.pack(fill='x', pady=5)
     
+    # NOVÉ: Bloky symbolov
+    block_f = ttk.Frame(s_frame); block_f.pack(fill='x', pady=(0, 5))
+    ttk.Label(block_f, text="📂 Bloky:").pack(side='left', padx=5)
+    block_v = tk.StringVar()
+    block_combo = ttk.Combobox(block_f, textvariable=block_v, width=20, state='readonly')
+    block_combo.pack(side='left', padx=5)
+    
+    def update_block_combo_hunter():
+        blocks = ["-- Vybrať blok --"] + sorted(state.symbol_blocks.keys())
+        block_combo['values'] = blocks
+        block_combo.current(0)
+    
+    update_block_combo_hunter()
+
+    def on_block_selected_hunter(event=None):
+        name = block_v.get()
+        if name == "-- Vybrať blok --": return
+        syms = state.symbol_blocks.get(name, [])
+        if syms:
+            # Pridáme symboly, ktoré tam ešte nie sú
+            changed = False
+            for s in syms:
+                if s not in state.hunter_custom_tickers:
+                    state.hunter_custom_tickers.append(s)
+                    changed = True
+            if changed:
+                state.save_settings_file()
+                update_hunter_symbols_ui(state, symbols_container)
+                refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)
+
+    block_combo.bind("<<ComboboxSelected>>", on_block_selected_hunter)
+
+    def open_manager_hunter():
+        from modularny.shared_state import open_symbol_block_manager
+        open_symbol_block_manager(state, update_block_combo_hunter)
+
+    ttk.Button(block_f, text="📁 Spravovať bloky", command=open_manager_hunter).pack(side='left', padx=5)
+
     # Pridávanie vlastných tickerov
     add_f = ttk.Frame(s_frame); add_f.pack(fill='x', pady=(0, 5))
     ttk.Label(add_f, text="Pridať vlastný ticker:").pack(side='left', padx=5)
@@ -1662,12 +1807,15 @@ def create_swing_hunter_tab(parent, state):
     ctrl = ttk.LabelFrame(frame, text="⚙️ Nastavenia", padding=10); ctrl.pack(fill='x', pady=5)
     ttk.Label(ctrl, text="RSI:").pack(side='left', padx=5)
     rsi_p = tk.StringVar(value="14"); ttk.Entry(ctrl, textvariable=rsi_p, width=5).pack(side='left', padx=2)
+    state.hunter_rsi_p = rsi_p
     ttk.Label(ctrl, text="RVI:").pack(side='left', padx=(15, 5))
     rvi_p = tk.StringVar(value="10"); ttk.Entry(ctrl, textvariable=rvi_p, width=5).pack(side='left', padx=2)
+    state.hunter_rvi_p = rvi_p
     
     # Výber časových rámcov (multi-select by bol fajn, ale zatiaľ skúsime fixné sady alebo prepínač)
     ttk.Label(ctrl, text="Základný TF:").pack(side='left', padx=(15, 5))
     tf_v = tk.StringVar(value="4 hours")
+    state.hunter_tf_v = tf_v
     tf_combo = ttk.Combobox(ctrl, textvariable=tf_v, values=["15 mins", "1 hour", "4 hours", "1 day", "1 week"], width=10)
     tf_combo.pack(side='left', padx=5)
     tf_combo.bind("<<ComboboxSelected>>", lambda e: refresh_hunter(state, state.hunter_tree, rsi_p, rvi_p, tf_v))
@@ -1688,6 +1836,18 @@ def create_swing_hunter_tab(parent, state):
                                values=list(SCORE_FILTER_MAP.keys()), width=10, state='readonly')
     score_combo.pack(side='left')
     score_combo.bind("<<ComboboxSelected>>", lambda e: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v))
+    
+    def clear_hunter_results():
+        if messagebox.askyesno("Swing Hunter", "Naozaj chcete vymazať všetky výsledky z tabuľky?"):
+            for item in tree.get_children():
+                tree.delete(item)
+            state.hunter_symbol_summaries = {}
+            state.hunter_last_scores = {}
+            state.hunter_last_update = {}
+            state.hunter_status_label.config(text="Výsledky vymazané", foreground="gray")
+
+    ttk.Button(ctrl, text="🗑️ Vymazať výsledky", command=clear_hunter_results).pack(side='left', padx=10)
+
     highlight_frame = tk.Frame(ctrl, highlightbackground='#2e7d32', highlightthickness=2, bd=0)
     highlight_frame.pack(side='right', padx=10, pady=2)
     state.hunter_last_scores = {}
@@ -1699,29 +1859,30 @@ def create_swing_hunter_tab(parent, state):
 
     t_frame = ttk.Frame(frame); t_frame.pack(fill='both', expand=True, pady=10)
     # Upravené stĺpce pre Tree structure (Skóre a %B)
-    cols = ('price', 'trend', 'rsi_score', 'pct_b', 'next_update', 'rvi', 'rvi_sig', 'p_dist_bb', 'status', 'action', 'ml_prob', 'breakdown', 'pl_signal')
+    cols = ('price', 'trend', 'rsi_score', 'adx', 'pct_b', 'next_update', 'rvi', 'rvi_sig', 'p_dist_bb', 'status', 'action', 'ml_prob', 'breakdown', 'pl_signal')
     tree = ttk.Treeview(t_frame, columns=cols, show='tree headings')
     
-    tree._sort_states = {'#0': False, 'rsi_score': False}
+    tree._sort_states = {'#0': False, 'rsi_score': False, 'adx': False}
     def _on_sort(col):
         reverse = tree._sort_states.get(col, False)
         sort_hunter_tree_parents(tree, col, reverse)
         tree._sort_states[col] = not reverse
 
-    tree.heading('#0', text='Sym/Tim', command=lambda: _on_sort('#0')); tree.column('#0', width=150, anchor='w')
-    tree.heading('price', text='Cena'); tree.column('price', width=90, anchor='center')
-    tree.heading('trend', text='T(MA200)'); tree.column('trend', width=140, anchor='center')
-    tree.heading('rsi_score', text='RSI/SK', command=lambda: _on_sort('rsi_score')); tree.column('rsi_score', width=100, anchor='center')
-    tree.heading('pct_b', text='%B'); tree.column('pct_b', width=80, anchor='center')
-    tree.heading('next_update', text='Dalšia akt.'); tree.column('next_update', width=80, anchor='center')
-    tree.heading('rvi', text='RVI'); tree.column('rvi', width=90, anchor='center')
-    tree.heading('rvi_sig', text='RVI Sig'); tree.column('rvi_sig', width=90, anchor='center')
-    tree.heading('p_dist_bb', text='Pivot'); tree.column('p_dist_bb', width=120, anchor='center')
-    tree.heading('status', text='Stav'); tree.column('status', width=150, anchor='center')
-    tree.heading('action', text='Akcia'); tree.column('action', width=160, anchor='center')
-    tree.heading('ml_prob', text='ML P(%)'); tree.column('ml_prob', width=80, anchor='center')
-    tree.heading('breakdown', text='Rozklad'); tree.column('breakdown', width=200, anchor='w')
-    tree.heading('pl_signal', text='P/L Signálu'); tree.column('pl_signal', width=100, anchor='center')
+    tree.heading('#0', text='Sym/Tim', command=lambda: _on_sort('#0')); tree.column('#0', width=120, anchor='w')
+    tree.heading('price', text='Cena'); tree.column('price', width=80, anchor='center')
+    tree.heading('trend', text='T(MA200)'); tree.column('trend', width=100, anchor='center')
+    tree.heading('rsi_score', text='RSI/SK', command=lambda: _on_sort('rsi_score')); tree.column('rsi_score', width=80, anchor='center')
+    tree.heading('adx', text='ADX', command=lambda: _on_sort('adx')); tree.column('adx', width=50, anchor='center')
+    tree.heading('pct_b', text='%B'); tree.column('pct_b', width=65, anchor='center')
+    tree.heading('next_update', text='Dalšia akt.'); tree.column('next_update', width=75, anchor='center')
+    tree.heading('rvi', text='RVI'); tree.column('rvi', width=75, anchor='center')
+    tree.heading('rvi_sig', text='RVI Sig'); tree.column('rvi_sig', width=75, anchor='center')
+    tree.heading('p_dist_bb', text='Pivot'); tree.column('p_dist_bb', width=100, anchor='center')
+    tree.heading('status', text='Stav'); tree.column('status', width=130, anchor='center')
+    tree.heading('action', text='Akcia/Stratégia'); tree.column('action', width=220, anchor='center')
+    tree.heading('ml_prob', text='ML P(%)'); tree.column('ml_prob', width=65, anchor='center')
+    tree.heading('breakdown', text='Rozklad'); tree.column('breakdown', width=180, anchor='w')
+    tree.heading('pl_signal', text='P/L Signálu'); tree.column('pl_signal', width=90, anchor='center')
 
     tree.pack(side='left', fill='both', expand=True)
     sb = ttk.Scrollbar(t_frame, command=tree.yview); sb.pack(side='right', fill='y'); tree.configure(yscrollcommand=sb.set)
@@ -2192,7 +2353,25 @@ def open_tws_execution_window(state, symbol, plan_vars, summary):
 
     # --- PREMENNÉ ---
     order_type_var = tk.StringVar(value="OPTION")
-    combo_mode_var = tk.StringVar(value="SINGLE") # SINGLE, SPREAD, ROLL
+    
+    # Auto-detekcia režimu podľa odporúčanej stratégie
+    opt_strat = plan_vars.get('option_strategy', tk.StringVar(value="")).get().upper()
+    initial_mode = "SINGLE"
+    initial_right = "CALL"
+    
+    if "PUT" in opt_strat:
+        initial_right = "PUT"
+    elif "CALL" in opt_strat:
+        initial_right = "CALL"
+    
+    if "SPREAD" in opt_strat:
+        initial_mode = "SPREAD"
+    elif "CALENDAR" in opt_strat or "DIAGONAL" in opt_strat:
+        initial_mode = "ROLL"
+    elif "PMCC" in opt_strat:
+        initial_mode = "PMCC"
+
+    combo_mode_var = tk.StringVar(value=initial_mode) # SINGLE, SPREAD, ROLL, PMCC
     
     action_raw = plan_vars['action'].get().upper()
     default_action = "BUY"
@@ -2202,7 +2381,7 @@ def open_tws_execution_window(state, symbol, plan_vars, summary):
     # Leg 1
     l1_action = tk.StringVar(value=default_action)
     l1_qty = tk.StringVar(value="1")
-    l1_right = tk.StringVar(value="PUT" if default_action == "BUY" else "CALL")
+    l1_right = tk.StringVar(value=initial_right)
     l1_expiry = tk.StringVar()
     l1_strike = tk.StringVar()
     l1_greeks = tk.StringVar(value="Cena: — | Δ: — | Θ: —")
@@ -2210,7 +2389,7 @@ def open_tws_execution_window(state, symbol, plan_vars, summary):
     # Leg 2
     l2_action = tk.StringVar(value="SELL" if default_action == "BUY" else "BUY")
     l2_qty = tk.StringVar(value="1")
-    l2_right = tk.StringVar(value="PUT" if default_action == "BUY" else "CALL")
+    l2_right = tk.StringVar(value=initial_right)
     l2_expiry = tk.StringVar()
     l2_strike = tk.StringVar()
     l2_greeks = tk.StringVar(value="Cena: — | Δ: — | Θ: —")
@@ -2558,17 +2737,156 @@ def load_cached_candles(symbol, timeframe="1 day"):
     """Načíta sviečky z cache pre potreby grafu."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cache_dir = os.path.join(root, 'cache', 'history')
-    filename = f"{symbol}_{timeframe.replace(' ', '_')}.json"
+    timeframe_clean = timeframe.replace(' ', '_')
+    
+    # 1. Skúsime priamy názov (starý formát)
+    filename = f"{symbol}_{timeframe_clean}.json"
     path = os.path.join(cache_dir, filename)
     
     if not os.path.exists(path):
-        return []
+        # 2. Skúsime hľadať súbor s akýmkoľvek duration (nový formát)
+        import glob
+        pattern = os.path.join(cache_dir, f"{symbol}_{timeframe_clean}_*.json")
+        matches = glob.glob(pattern)
+        if matches:
+            # Zoberieme najnovší (podľa mtime)
+            path = max(matches, key=os.path.getmtime)
+        else:
+            return []
+
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             return data.get('candles', [])
     except Exception:
         return []
+
+def generate_ai_analysis(symbol, summary):
+    """Vygeneruje textovú analýzu na základe dát zo Swing Huntera s dôrazom na momentum."""
+    price = summary.get('price', 0)
+    rsi = summary.get('rsi', 0)
+    pct_b = summary.get('pct_b', 0)
+    trend = summary.get('trend_label', 'Neutral')
+    zone = summary.get('zone', 'neutral')
+    macd = summary.get('macd', {})
+    ml_prob = summary.get('ml_prob', 0)
+    adx = summary.get('adx', 0)
+    pdi = summary.get('pdi', 0)
+    mdi = summary.get('mdi', 0)
+    
+    analysis = [f"--- Inteligentná analýza {symbol} ---"]
+    
+    # 1. Trend a MA200
+    trend_txt = "býčom" if trend == "Býk" else "medveďom" if trend == "Bear" else "neutrálnom"
+    analysis.append(f"• TREND: Dlhodobo sa nachádzame v {trend_txt} trende (cena {price:.2f}).")
+
+    # 1b. Sila trendu (ADX)
+    if adx > 25:
+        adx_txt = f"🟢 SILNÝ ({adx:.1f})"
+    elif adx > 20:
+        adx_txt = f"🟡 MIERNY ({adx:.1f})"
+    else:
+        adx_txt = f"⚪ SLABÝ / STRANA ({adx:.1f})"
+    
+    dmi_txt = "Býčie (+DI > -DI)" if pdi > mdi else "Medvedie (-DI > +DI)"
+    analysis.append(f"• SILA TRENDU (ADX): {adx_txt}. Smerovanie DMI: {dmi_txt}.")
+    
+    # 2. Momentum (MACD) - KĽÚČOVÉ ZLEPŠENIE
+    macd_val = macd.get('macd', 0)
+    sig_val = macd.get('signal', 0)
+    is_cross = macd.get('is_cross', False)
+    
+    if macd_val < sig_val:
+        momentum_txt = "🔴 NEGATÍVNE (Bearish)"
+        if is_cross:
+            momentum_txt += " - ČERSTVÝ PREDPREDAJNÝ SIGNÁL!"
+        analysis.append(f"• MOMENTUM (MACD): {momentum_txt}. Cena stráca silu a klesá.")
+    else:
+        momentum_txt = "🟢 POZITÍVNE (Bullish)"
+        if is_cross:
+            momentum_txt += " - ČERSTVÝ NÁKUPNÝ SIGNÁL!"
+        analysis.append(f"• MOMENTUM (MACD): {momentum_txt}. Sila kupujúcich rastie.")
+
+    # 3. Indikátory a Zóna
+    if zone == 'hunt':
+        analysis.append("• ZÓNA: Nákupná oblasť (Hunt Zone). Dobré pre Mean Reversion.")
+    elif zone == 'risk':
+        analysis.append("• ZÓNA: Riziková oblasť (Risk). Hrozí vyčerpanie kupujúcich.")
+    
+    ind_parts = []
+    if rsi > 70: ind_parts.append(f"RSI ({rsi:.1f}) je prekúpené")
+    elif rsi < 30: ind_parts.append(f"RSI ({rsi:.1f}) je prepredané")
+    else: ind_parts.append(f"RSI ({rsi:.1f}) je v neutrálnom pásme")
+    
+    if pct_b > 100: ind_parts.append("cena je nad Bollingerovými pásmami")
+    elif pct_b < 0: ind_parts.append("cena je pod Bollingerovými pásmami")
+    
+    analysis.append(f"• INDIKÁTORY: {', '.join(ind_parts)}.")
+
+    # 4. Syntéza a odporúčanie
+    analysis.append("\n--- ZÁVER A ODPORÚČANIE ---")
+    strat = summary.get('option_strategy', 'žiadna')
+    
+    # Prísnejšia logika zhody
+    dmi_bullish = pdi > mdi
+    macd_bullish = macd_val > sig_val
+    trend_bullish = trend == "Býk"
+    
+    # Detekcia konfliktov
+    if adx < 20:
+        analysis.append(f"⚠️ POZOR: Trh nemá jasnú silu (ADX {adx:.1f} < 20).")
+        analysis.append(f"V bočnom trhu sú smerové stratégie ako {strat} riskantné.")
+        analysis.append("Odporúčam skôr neutrálne stratégie (napr. Bull Put Spread s veľkým vankúšom).")
+    elif trend_bullish and not dmi_bullish:
+        analysis.append(f"⚠️ KONFLIKT: Dlhodobý trend je Býčí, ale krátkodobé smerovanie (DMI) je MEDVEDIE.")
+        analysis.append(f"Strategia {strat} je momentálne predčasná. Počkajte na +DI > -DI.")
+    elif macd_val < sig_val and trend_bullish:
+        analysis.append(f"Hoci je trend Býčí, MACD varuje pred poklesom (PULLBACK).")
+        analysis.append(f"NAVROHOVANÁ STRATÉGIA ({strat}) JE RIZIKOVÁ. Počkajte na otočenie MACD do zelena.")
+    elif macd_bullish and trend_bullish and dmi_bullish:
+        if adx > 25:
+            analysis.append(f"✅ EXCELENTNÁ ZHODA: Trend, Momentum, Smer (DMI) aj Sila (ADX) sú v súlade.")
+            analysis.append(f"Stratégia {strat} má v týchto podmienkach najvyššiu šancu na úspech.")
+        else:
+            analysis.append(f"Trend, Momentum aj DMI sú v zhode. Sila trendu (ADX) je mierna, ale smer je správny.")
+            analysis.append(f"Stratégia {strat} je vhodná.")
+    else:
+        analysis.append(f"Odporúčaná stratégia: {strat}")
+        analysis.append("Podmienky nie sú ideálne, postupujte opatrne.")
+
+    # 5. Konkrétne opčné parametre
+    analysis.append("\n--- NÁVRH KONKRÉTNYCH PARAMETROV ---")
+    atr = summary.get('atr') or (price * 0.02)
+    pivots = summary.get('pivots', {})
+    s1 = pivots.get('S1') or (price - (1.5 * atr))
+    r1 = pivots.get('R1') or (price + (1.5 * atr))
+    
+    exp_days = "30-45 dní" if "Spread" in strat else "14-28 dní"
+    analysis.append(f"• ODPORÚČANÁ EXPIRÁCIA: cca {exp_days}")
+
+    if "Call debit" in strat:
+        l_str = round(price)
+        s_str = round(r1)
+        if s_str <= l_str: s_str = l_str + 2
+        analysis.append(f"• NÁVRH STRIKOV: BUY Call {l_str} / SELL Call {s_str}")
+        analysis.append(f"• Cieľ (TP): {s_str} | Max strata (SL): pod {s1:.2f}")
+
+    elif "Bull put" in strat:
+        s_str = round(s1)
+        l_str = s_str - 2
+        analysis.append(f"• NÁVRH STRIKOV: SELL Put {s_str} / BUY Put {l_str}")
+        analysis.append(f"• Bezpečný nákupný bod: nad {s_str}")
+
+    elif "Bear call" in strat:
+        s_str = round(r1)
+        l_str = s_str + 2
+        analysis.append(f"• NÁVRH STRIKOV: SELL Call {s_str} / BUY Call {l_str}")
+        analysis.append(f"• Hranica rizika: {s_str}")
+
+    if ml_prob:
+        analysis.append(f"\nPravdepodobnosť úspechu podľa ML: {ml_prob*100:.0f}%")
+
+    return "\n".join(analysis)
 
 def open_chart_window(state, symbol, summary):
     """Otvorí okno s grafom a pivotmi."""
@@ -2600,9 +2918,33 @@ def open_chart_window(state, symbol, summary):
 
     win = tk.Toplevel(state.root)
     win.title(f"Graf {symbol} ({current_tf})")
-    win.geometry("800x600")
+    win.geometry("850x700")
 
-    fig = Figure(figsize=(8, 6), dpi=100)
+    # --- NOVÉ: Sekcia pre Inteligentnú analýzu (HORE) ---
+    analysis_frame = ttk.LabelFrame(win, text="🤖 Inteligentná analýza", padding=10)
+    analysis_frame.pack(fill='both', expand=True, side='top', padx=10, pady=10)
+    
+    analysis_text = tk.Text(analysis_frame, height=15, font=('Arial', 11), wrap='word', bg='#f9f9f9', relief='flat')
+    analysis_text.pack(fill='both', side='left', expand=True)
+    
+    analysis_scroll = ttk.Scrollbar(analysis_frame, command=analysis_text.yview)
+    analysis_scroll.pack(side='right', fill='y')
+    analysis_text.config(yscrollcommand=analysis_scroll.set)
+
+    def show_analysis():
+        report = generate_ai_analysis(symbol, summary)
+        analysis_text.config(state='normal')
+        analysis_text.delete('1.0', tk.END)
+        analysis_text.insert('1.0', report)
+        analysis_text.config(state='disabled')
+
+    # Spustiť analýzu automaticky pri otvorení
+    show_analysis()
+
+    ttk.Button(analysis_frame, text="🔄 Obnoviť analýzu", command=show_analysis).pack(side='bottom', pady=(5,0))
+
+    # --- GRAF (DOLE A MENŠÍ) ---
+    fig = Figure(figsize=(8, 2.0), dpi=100)
     ax = fig.add_subplot(111)
 
     # Príprava dát pre sviečky
@@ -2636,20 +2978,20 @@ def open_chart_window(state, symbol, summary):
         ax.axhline(y=curr_price, color='black', linestyle=':', alpha=0.8)
         ax.text(0, curr_price, f" Teraz: {curr_price:.2f}", color='black', va='bottom', fontsize=9, bbox=dict(facecolor='white', alpha=0.5))
 
-    ax.set_title(f"{symbol} - {current_tf} (Pivoty z denného TF)")
+    ax.set_title(f"{symbol} - {current_tf} (Zmenšený náhľad)", fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.set_ylabel("Cena (USD)")
+    ax.set_ylabel("Cena", fontsize=8)
     
     # Odstránenie X osi (indexy nie sú dôležité)
     ax.set_xticks([])
 
     canvas = FigureCanvasTkAgg(fig, master=win)
     canvas.draw()
-    canvas.get_tk_widget().pack(fill='both', expand=True)
+    canvas.get_tk_widget().pack(fill='x', side='bottom', padx=10, pady=(0, 10))
 
     # Legenda
     if pivots:
-        ax.legend(loc='upper left', fontsize='small')
+        ax.legend(loc='upper left', fontsize='x-small')
 
 def open_trade_plan_window(state, summary):
     symbol = summary.get('symbol')

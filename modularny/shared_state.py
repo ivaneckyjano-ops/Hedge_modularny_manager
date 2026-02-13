@@ -232,6 +232,9 @@ class SharedState:
         self.dividend_cache = {} 
         self._is_loading = False # Poistka proti prepísaniu pri načítavaní
 
+        # NOVÉ: Symbol Blocks - zoznamy symbolov zoskupené do blokov
+        self.symbol_blocks = {} # {názov_bloku: [SYM1, SYM2, ...]}
+        
         # Načítaj nastavenia
         self.load_settings_file()
         
@@ -293,7 +296,10 @@ class SharedState:
             self._auto_recalc_callback()
     
     def create_status_bar(self):
-        """Vytvorí status bar s indikátorom pripojenia"""
+        # Štýly pre malé tlačidlá
+        style = ttk.Style()
+        style.configure('Small.TButton', font=('Arial', 7))
+        
         status_frame = ttk.Frame(self.root)
         status_frame.pack(fill='x', padx=5, pady=2)
         
@@ -842,6 +848,7 @@ class SharedState:
                     self.hunter_custom_tickers = data.get('hunter_custom_tickers', [])
                     self.hunter_pinned_symbols = data.get('hunter_pinned_symbols', [])
                     self.pmcc_symbols = data.get('pmcc_symbols', ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"])
+                    self.symbol_blocks = data.get('symbol_blocks', {})
             else:
                 self.saved_strategies = {}
                 # Nastav default hodnoty aj pre Semafor a model priority ak súbor neexistuje
@@ -853,6 +860,7 @@ class SharedState:
                 self.hunter_custom_tickers = []
                 self.hunter_pinned_symbols = []
                 self.pmcc_symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"]
+                self.symbol_blocks = {}
 
         except Exception as e:
             print(f"Chyba pri načítavaní nastavení: {e}")
@@ -891,7 +899,8 @@ class SharedState:
                 'monitor_selected_symbols': [sym for sym, var in self.monitor_selected_symbols.items() if var.get()],
                 'hunter_custom_tickers': getattr(self, 'hunter_custom_tickers', []),
                 'hunter_pinned_symbols': getattr(self, 'hunter_pinned_symbols', []),
-                'pmcc_symbols': getattr(self, 'pmcc_symbols', [])
+                'pmcc_symbols': getattr(self, 'pmcc_symbols', []),
+                'symbol_blocks': getattr(self, 'symbol_blocks', {})
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -1237,3 +1246,95 @@ class SharedState:
             messagebox.showinfo("Vyhľadávanie už skončilo", "Vyhľadávanie už bolo ukončené alebo skončilo samo.")
         else:
             messagebox.showinfo("Žiadne vyhľadávanie", "Momentálne neprebieha žiadne vyhľadávanie Strangle.")
+
+def open_symbol_block_manager(state, on_close_callback=None):
+    """Otvorí dialóg na správu blokov symbolov"""
+    win = tk.Toplevel(state.root)
+    win.title("📁 Správca blokov symbolov")
+    win.geometry("500x450")
+    win.transient(state.root)
+    win.grab_set()
+
+    main_f = ttk.Frame(win, padding=15)
+    main_f.pack(fill='both', expand=True)
+
+    ttk.Label(main_f, text="Vaše bloky symbolov:", font=('Arial', 10, 'bold')).pack(anchor='w')
+
+    list_f = ttk.Frame(main_f)
+    list_f.pack(fill='both', expand=True, pady=5)
+
+    block_list = tk.Listbox(list_f, font=('Arial', 10), height=8)
+    block_list.pack(side='left', fill='both', expand=True)
+    
+    sb = ttk.Scrollbar(list_f, command=block_list.yview)
+    sb.pack(side='right', fill='y')
+    block_list.config(yscrollcommand=sb.set)
+
+    def refresh_list():
+        block_list.delete(0, tk.END)
+        for name in sorted(state.symbol_blocks.keys()):
+            block_list.insert(tk.END, name)
+
+    refresh_list()
+
+    # Detaily vybratého bloku
+    detail_f = ttk.LabelFrame(main_f, text="Detaily bloku", padding=10)
+    detail_f.pack(fill='x', pady=5)
+
+    ttk.Label(detail_f, text="Názov bloku:").pack(anchor='w')
+    name_ent = ttk.Entry(detail_f)
+    name_ent.pack(fill='x', pady=(0, 5))
+
+    ttk.Label(detail_f, text="Symboly (oddelené čiarkou):").pack(anchor='w')
+    sym_ent = ttk.Entry(detail_f)
+    sym_ent.pack(fill='x')
+
+    def on_select(event):
+        sel = block_list.curselection()
+        if not sel: return
+        name = block_list.get(sel[0])
+        name_ent.delete(0, tk.END)
+        name_ent.insert(0, name)
+        syms = state.symbol_blocks.get(name, [])
+        sym_ent.delete(0, tk.END)
+        sym_ent.insert(0, ", ".join(syms))
+
+    block_list.bind("<<ListboxSelect>>", on_select)
+
+    btn_f = ttk.Frame(main_f)
+    btn_f.pack(fill='x', pady=10)
+
+    def save_block():
+        name = name_ent.get().strip()
+        raw_syms = sym_ent.get().strip().upper()
+        if not name or not raw_syms:
+            messagebox.showwarning("Chyba", "Zadajte názov bloku aj symboly.")
+            return
+        
+        symbols = [s.strip() for s in raw_syms.replace(',', ' ').split() if s.strip()]
+        state.symbol_blocks[name] = symbols
+        state.save_settings_file()
+        refresh_list()
+        messagebox.showinfo("Úspech", f"Blok '{name}' bol uložený.")
+
+    def delete_block():
+        sel = block_list.curselection()
+        if not sel: return
+        name = block_list.get(sel[0])
+        if messagebox.askyesno("Vymazať", f"Naozaj chcete vymazať blok '{name}'?"):
+            del state.symbol_blocks[name]
+            state.save_settings_file()
+            name_ent.delete(0, tk.END)
+            sym_ent.delete(0, tk.END)
+            refresh_list()
+
+    ttk.Button(btn_f, text="💾 Uložiť / Pridať", command=save_block).pack(side='left', padx=5)
+    ttk.Button(btn_f, text="🗑️ Vymazať", command=delete_block).pack(side='left', padx=5)
+    
+    def on_win_close():
+        if on_close_callback: on_close_callback()
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", on_win_close)
+    ttk.Button(main_f, text="Zatvoriť", command=on_win_close).pack(pady=5)
+

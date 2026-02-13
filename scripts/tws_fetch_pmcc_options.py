@@ -225,8 +225,8 @@ def main():
         
         print(json.dumps({
             'success': True, 'underlying_price': price, 'iv': model_iv,
-            'leaps': sorted(leaps_list, key=lambda x: abs(x['delta'] - 0.80))[:60],
-            'short': sorted(short_list, key=lambda x: abs(x['delta'] - 0.25))[:60]
+            'leaps': sorted(leaps_list, key=lambda x: abs(x['delta'] - 0.80))[:30],
+            'short': sorted(short_list, key=lambda x: abs(x['delta'] - 0.25))[:30]
         }))
         
     except Exception as e:
