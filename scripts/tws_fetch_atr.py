@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Fetch ATR (7-day average high-low range) from TWS"""
 import sys
-sys.path.insert(0, '/home/narbon/Aplikácie/tws-webapp/venv/lib/python3.12/site-packages')
 from ib_insync import IB, Stock
 import random
 

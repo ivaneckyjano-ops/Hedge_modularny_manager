@@ -28,7 +28,7 @@ def roll_fetch_underlying(state):
             result = subprocess.run(
                 ['python3', script_path, str(state.port_var.get()), state.symbol_var.get()], 
                 capture_output=True, text=True, timeout=20,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             output = result.stdout.strip().split('\n')[0]
             if result.returncode == 0 and output and not output.startswith("ERROR:"):
@@ -66,7 +66,7 @@ def roll_fetch_current_premium(state):
             result = subprocess.run(
                 ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
                 capture_output=True, text=True, timeout=20,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             output = result.stdout.strip()
             stderr = result.stderr.strip()

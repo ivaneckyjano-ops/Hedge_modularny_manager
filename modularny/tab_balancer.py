@@ -563,7 +563,7 @@ def fetch_bal_underlying(state):
             script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_fetch_price.py')
             result = subprocess.run(['python3', script_path, str(state.port_var.get()), state.symbol_var.get()],
                                     capture_output=True, text=True, timeout=20,
-                                    cwd='/home/narbon/Aplikácie/tws-webapp')
+                                    cwd=os.path.dirname(os.path.dirname(__file__)))
             out = result.stdout.strip().split('\n')[0] if result.stdout else ''
             if result.returncode == 0 and out and not out.startswith("ERROR:"):
                 state.root.after(0, lambda v=out: state.bal_underlying_var.set(v))
@@ -685,7 +685,7 @@ def analyze_balancer(state):
             result = subprocess.run(
                 ['python3', script_path, str(state.port_var.get()), state.symbol_var.get(), expiry, str(balanced_strike), right],
                 capture_output=True, text=True, timeout=15,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             
             output = result.stdout.strip()
@@ -926,7 +926,7 @@ def fetch_balancer_option_price(state):
             result = subprocess.run(
                 ['python3', script_path, str(port), symbol, expiry, str(strike), right],
                 capture_output=True, text=True, timeout=20,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             output = result.stdout.strip()
             stderr = result.stderr.strip()

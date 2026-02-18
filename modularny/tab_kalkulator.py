@@ -52,7 +52,7 @@ def fetch_underlying_price(state):
             result = subprocess.run(
                 ['python3', script_path, str(state.port_var.get()), state.symbol_var.get()], 
                 capture_output=True, text=True, timeout=20,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             
             output = result.stdout.strip()
@@ -124,7 +124,7 @@ def fetch_option_price(state, leg_type):
                 result = subprocess.run(
                     cmd,
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=os.path.dirname(os.path.dirname(__file__))
                 )
                 output = result.stdout.strip()
                 stderr = result.stderr.strip()
@@ -203,7 +203,7 @@ def fetch_atr(state):
             result = subprocess.run(
                 ['python3', script_path, str(port), symbol],
                 capture_output=True, text=True, timeout=15,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             
             output = result.stdout.strip()
@@ -959,7 +959,7 @@ def find_strangle_gui(state):
             result = subprocess.run(
                 cmd,
                 capture_output=True, text=True, timeout=30,
-                cwd='/home/narbon/Aplikácie/tws-webapp'
+                cwd=os.path.dirname(os.path.dirname(__file__))
             )
             
             output = result.stdout.strip()

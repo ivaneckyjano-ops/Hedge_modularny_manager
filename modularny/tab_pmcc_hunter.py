@@ -71,7 +71,7 @@ class PMCCHunterTab:
         block_row.pack(fill='x', pady=(0, 2))
         
         ttk.Label(block_row, text="Bloky:", font=('Arial', 7)).pack(side='left')
-        self.block_var = tk.StringVar()
+        self.block_var = self.state.pmcc_selected_block
         self.block_combo = ttk.Combobox(block_row, textvariable=self.block_var, width=15, state='readonly', font=('Arial', 8))
         self.block_combo.pack(side='left', padx=2)
         self.update_block_combo()
@@ -79,7 +79,25 @@ class PMCCHunterTab:
         
         ttk.Button(block_row, text="📁 Spravovať bloky", command=self.open_block_manager, style='Small.TButton').pack(side='left', padx=2)
         
-        ttk.Label(sym_frame, text="Zadajte symboly (oddelené čiarkou, medzerou alebo novým riadkom):", font=('Arial', 7)).pack(anchor='w')
+        # Riadok pre jeden symbol
+        single_row = ttk.Frame(sym_frame)
+        single_row.pack(fill='x', pady=2)
+        ttk.Label(single_row, text="Rýchly sken symbolu:", font=('Arial', 7)).pack(side='left')
+        self.single_sym_var = tk.StringVar()
+        self.single_sym_ent = ttk.Entry(single_row, textvariable=self.single_sym_var, width=12, font=('Arial', 8))
+        self.single_sym_ent.pack(side='left', padx=2)
+        
+        def run_single_pmcc_scan(event=None):
+            sym = self.single_sym_var.get().strip().upper()
+            if not sym:
+                messagebox.showwarning("PMCC Hunter", "Zadajte symbol.")
+                return
+            self.run_pmcc_scan(forced_symbols=[sym])
+            
+        self.single_sym_ent.bind('<Return>', run_single_pmcc_scan)
+        ttk.Button(single_row, text="🔍 Skenovať", command=run_single_pmcc_scan, style='Small.TButton').pack(side='left', padx=2)
+
+        ttk.Label(sym_frame, text="Zoznam symbolov pre hromadný sken:", font=('Arial', 7)).pack(anchor='w', pady=(5, 0))
         
         self.sym_text = tk.Text(sym_frame, height=4, width=30, font=('Arial', 9), undo=True)
         self.sym_text.pack(side='left', fill='both', expand=True, pady=2)
@@ -124,7 +142,7 @@ class PMCCHunterTab:
         self.status_lbl.pack(side='left', padx=5)
         
         ttk.Button(btn_panel, text="🚀 OTVORIŤ V TRADE PLAN", command=self.open_in_trade_plan).pack(side='right', padx=2)
-        ttk.Button(btn_panel, text="🚀 VYHĽADAŤ PMCC", command=self.run_pmcc_scan).pack(side='right', padx=2)
+        ttk.Button(btn_panel, text="🚀 VYHĽADAŤ PMCC (Celý zoznam)", command=self.run_pmcc_scan).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="⏹️ STOP", command=self.stop_scan).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="📊 CSV Export", command=self.export_to_csv).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="📂 CSV Import", command=self.import_from_csv).pack(side='right', padx=2)
@@ -208,9 +226,13 @@ class PMCCHunterTab:
         self.tree.tag_configure('child', background='#f5f5f5')
 
     def update_block_combo(self):
+        current = self.block_var.get()
         blocks = ["-- Vybrať blok --"] + sorted(self.state.symbol_blocks.keys())
         self.block_combo['values'] = blocks
-        self.block_combo.current(0)
+        if current in blocks:
+            self.block_combo.set(current)
+        else:
+            self.block_combo.current(0)
 
     def on_block_selected(self, event=None):
         name = self.block_var.get()
@@ -221,6 +243,7 @@ class PMCCHunterTab:
             self.sym_text.delete('1.0', tk.END)
             self.sym_text.insert('1.0', ", ".join(symbols))
             self.on_symbols_text_changed()
+            self.state.save_settings_file()
 
     def open_block_manager(self):
         from modularny.shared_state import open_symbol_block_manager

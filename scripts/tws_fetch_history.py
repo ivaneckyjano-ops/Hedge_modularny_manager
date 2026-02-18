@@ -53,9 +53,11 @@ def main():
     ib = IB()
     try:
         # Skúsime sa pripojiť
+        print(f"DEBUG: Pripojujem sa k TWS na porte {args.port}...", file=sys.stderr)
         ib.connect('127.0.0.1', args.port, clientId=client_id, timeout=15)
         
-        # Špecifikácia kontraktu (pre ETFs skúsime SMART, ale aj konkrétne burzy ak treba)
+        # Špecifikácia kontraktu
+        print(f"DEBUG: Overujem kontrakt pre {args.symbol}...", file=sys.stderr)
         contract = Stock(args.symbol, 'SMART', 'USD')
         qualified = ib.qualifyContracts(contract)
         
@@ -63,11 +65,19 @@ def main():
             print(json.dumps({'success': False, 'error': f'Symbol {args.symbol} nebol v TWS nájdený.'}))
             return
 
-        # Sťahujeme dáta
+        # Sťahujeme dáta - vrátené na TRADES pre lepšiu kompatibilitu
+        print(f"DEBUG: Žiadam o historické dáta ({args.duration}, {args.barSize})...", file=sys.stderr)
         bars = ib.reqHistoricalData(
             contract, endDateTime='', durationStr=args.duration,
             barSizeSetting=args.barSize, whatToShow='TRADES', useRTH=True
         )
+        
+        if not bars:
+            print(f"DEBUG: Skúšam bez Regular Trading Hours (useRTH=False)...", file=sys.stderr)
+            bars = ib.reqHistoricalData(
+                contract, endDateTime='', durationStr=args.duration,
+                barSizeSetting=args.barSize, whatToShow='TRADES', useRTH=False
+            )
         
         if not bars:
             print(json.dumps({'success': False, 'error': 'TWS nevrátil žiadne historické sviečky.'}))

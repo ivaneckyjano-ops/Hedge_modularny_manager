@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """Check TWS connection"""
 import sys
-sys.path.insert(0, '/home/narbon/Aplikácie/tws-webapp/venv/lib/python3.12/site-packages')
+import os
+from pathlib import Path
+
+# Automatické hľadanie venv v priečinku projektu
+BASE_DIR = Path(__file__).resolve().parents[1]
+venv_site = BASE_DIR / 'venv' / 'lib' / 'python3.12' / 'site-packages'
+if venv_site.exists():
+    sys.path.insert(0, str(venv_site))
+
 from ib_insync import IB
 import random
 import json

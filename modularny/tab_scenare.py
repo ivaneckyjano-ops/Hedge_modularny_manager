@@ -10,7 +10,7 @@ import os
 
 # Import scenario simulator
 try:
-    sys.path.insert(0, '/home/narbon/Aplikácie/tws-webapp/scripts')
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts'))
     from scenario_simulator import ScenarioSimulator
     SCENARIO_AVAILABLE = True
 except ImportError:

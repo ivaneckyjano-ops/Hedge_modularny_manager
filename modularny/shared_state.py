@@ -195,9 +195,17 @@ class SharedState:
         self.hunter_selected_symbols = {} # Slovník sym -> tk.BooleanVar
         self.hunter_custom_tickers = [] # NOVÉ: Vlastné tickery pre Swing Hunter
         self.hunter_pinned_symbols = []
+        self.hunter_last_scores = {}
+        self.hunter_last_update = {}
+        self.hunter_last_breakdown = {}
+        self.hunter_next_update = {}
+        self.hunter_active_signals = {}
+        self.hunter_symbol_summaries = {}
         
         # NOVÉ: PMCC Hunter - vlastné symboly
         self.pmcc_symbols = [] # Zoznam symbolov pre PMCC
+        self.hunter_selected_block = tk.StringVar(value="-- Vybrať blok --")
+        self.pmcc_selected_block = tk.StringVar(value="-- Vybrať blok --")
         
         # NOVÉ: Swing Profit Watcher nastavenia
         self.monitor_profit_target_pct = tk.StringVar(value="50.0") # Cieľ pre zatvorenie opcií
@@ -387,7 +395,9 @@ class SharedState:
         if hasattr(self, '_tws_watchdog_thread') and self._tws_watchdog_thread and self._tws_watchdog_thread.is_alive():
             return
         def run():
-            root_dir = os.path.dirname(os.path.dirname(__file__))
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            py_path = os.path.join(root_dir, 'venv', 'bin', 'python3')
+            if not os.path.exists(py_path): py_path = sys.executable
             script = os.path.join(root_dir, 'scripts', 'tws_check_connection.py')
             was_connected = None
             alert_shown = False
@@ -400,14 +410,20 @@ class SharedState:
                     break
                     
                 port = self.current_port
-                cmd = [sys.executable, script, str(port)]
+                cmd = [py_path, script, str(port)]
                 connected = False
                 error_msg = ""
                 try:
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
-                    payload = json.loads(res.stdout.strip()) if res.stdout else {'connected': False}
-                    connected = payload.get('connected', False)
-                    error_msg = payload.get('error', '')
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root_dir)
+                    try:
+                        stdout, stderr = process.communicate(timeout=12)
+                        if process.returncode == 0 and stdout.strip():
+                            payload = json.loads(stdout.strip())
+                            connected = payload.get('connected', False)
+                            error_msg = payload.get('error', '')
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        error_msg = "Timeout"
                 except Exception as exc:
                     error_msg = str(exc)
                 status_text = "TWS: OK" if connected else "TWS: DISCONNECTED"
@@ -416,10 +432,10 @@ class SharedState:
                 if was_connected is None:
                     was_connected = connected
                 else:
-                    if was_connected and not connected and not alert_shown:
+                    if was_connected and not connected:
                         msg = error_msg or "API connection lost"
-                        self.root.after(0, lambda msg=msg: messagebox.showwarning("TWS Watchdog", f"Stratené spojenie s TWS:\n{msg}"))
-                        alert_shown = True
+                        print(f"⚠️ TWS Watchdog: Stratené spojenie: {msg}")
+                        # Odstránené messagebox.showwarning ktoré mohlo blokovať hlavnú thready
                     elif not was_connected and connected:
                         alert_shown = False
                 was_connected = connected
@@ -587,23 +603,35 @@ class SharedState:
         port = self.current_port
         def run():
             try:
-                script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_check_connection.py')
-                result = subprocess.run(
-                    ['python3', script_path, str(port)], 
-                    capture_output=True, text=True, timeout=15,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                py_path = os.path.join(root_dir, 'venv', 'bin', 'python3')
+                if not os.path.exists(py_path): py_path = sys.executable
+                
+                script_path = os.path.join(root_dir, 'scripts', 'tws_check_connection.py')
+                
+                # Použijeme Popen pre lepšiu kontrolu
+                process = subprocess.Popen(
+                    [py_path, script_path, str(port)], 
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, 
+                    cwd=root_dir
                 )
                 
-                if result.returncode == 0 and result.stdout.strip():
+                try:
+                    stdout, stderr = process.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': 'Timeout - TWS neodpovedá'}))
+                    return
+
+                if process.returncode == 0 and stdout.strip():
                     try:
-                        info = json.loads(result.stdout.strip())
+                        info = json.loads(stdout.strip())
                         self.root.after(0, lambda: self.update_connection_status(info))
                     except:
-                        self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': result.stdout + result.stderr}))
+                        self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': stdout + stderr}))
                 else:
-                    self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': result.stderr}))
-            except subprocess.TimeoutExpired:
-                self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': 'Timeout - TWS neodpovedá'}))
+                    self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': stderr or "Neznáma chyba skriptu"}))
+            
             except Exception as e:
                 self.root.after(0, lambda: self.update_connection_status({'connected': False, 'error': str(e)}))
         
@@ -655,12 +683,16 @@ class SharedState:
 
         def run():
             try:
-                script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'tws_load_expiries.py')
+                root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                py_path = os.path.join(root_dir, 'venv', 'bin', 'python3')
+                if not os.path.exists(py_path): py_path = sys.executable
+                
+                script_path = os.path.join(root_dir, 'scripts', 'tws_load_expiries.py')
                 # ...
                 result = subprocess.run(
-                    ['python3', script_path, str(port), symbol, right], 
+                    [py_path, script_path, str(port), symbol, right], 
                     capture_output=True, text=True, timeout=60,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=root_dir
                 )
                 
                 # Skryť progress bar
@@ -849,6 +881,10 @@ class SharedState:
                     self.hunter_pinned_symbols = data.get('hunter_pinned_symbols', [])
                     self.pmcc_symbols = data.get('pmcc_symbols', ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"])
                     self.symbol_blocks = data.get('symbol_blocks', {})
+                    self.hunter_selected_block.set(data.get('hunter_selected_block', "-- Vybrať blok --"))
+                    self.pmcc_selected_block.set(data.get('pmcc_selected_block', "-- Vybrať blok --"))
+                    self.hunter_score_filter_val = data.get('hunter_score_filter', "Žiadny filter")
+                    self.hunter_adx_filter_val = data.get('hunter_adx_filter', "Žiadny filter")
             else:
                 self.saved_strategies = {}
                 # Nastav default hodnoty aj pre Semafor a model priority ak súbor neexistuje
@@ -900,7 +936,11 @@ class SharedState:
                 'hunter_custom_tickers': getattr(self, 'hunter_custom_tickers', []),
                 'hunter_pinned_symbols': getattr(self, 'hunter_pinned_symbols', []),
                 'pmcc_symbols': getattr(self, 'pmcc_symbols', []),
-                'symbol_blocks': getattr(self, 'symbol_blocks', {})
+                'symbol_blocks': getattr(self, 'symbol_blocks', {}),
+                'hunter_selected_block': self.hunter_selected_block.get(),
+                'pmcc_selected_block': self.pmcc_selected_block.get(),
+                'hunter_score_filter': getattr(self, 'hunter_score_filter_var').get() if hasattr(self, 'hunter_score_filter_var') else "Žiadny filter",
+                'hunter_adx_filter': getattr(self, 'hunter_adx_filter_var').get() if hasattr(self, 'hunter_adx_filter_var') else "Žiadny filter"
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)

@@ -762,7 +762,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(self.port_var.get()), self.symbol_var.get()], 
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 
                 output = result.stdout.strip()
@@ -826,7 +826,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right],
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
 
                 output = result.stdout.strip()
@@ -897,7 +897,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol],
                     capture_output=True, text=True, timeout=15,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 
                 output = result.stdout.strip()
@@ -1742,7 +1742,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 
                 output = result.stdout.strip()
@@ -2155,7 +2155,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(self.port_var.get()), self.symbol_var.get()], 
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 output = result.stdout.strip().split('\n')[0]
                 if result.returncode == 0 and output and not output.startswith("ERROR:"):
@@ -2188,7 +2188,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right], 
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 
                 output = result.stdout.strip()
@@ -2356,7 +2356,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'tws_fetch_price.py')
                 result = subprocess.run(['python3', script_path, str(self.port_var.get()), self.symbol_var.get()],
                                         capture_output=True, text=True, timeout=20,
-                                        cwd='/home/narbon/Aplikácie/tws-webapp')
+                                        cwd=BASE_DIR)
                 out = result.stdout.strip().split('\n')[0] if result.stdout else ''
                 if result.returncode == 0 and out and not out.startswith("ERROR:"):
                     self.root.after(0, lambda v=out: self.bal_underlying_var.set(v))
@@ -2618,7 +2618,7 @@ Uložená:          {strategy.get('saved_at', '-')}
                 result = subprocess.run(
                     ['python3', script_path, str(port), symbol, expiry, str(strike), right],
                     capture_output=True, text=True, timeout=20,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 output = result.stdout.strip()
                 stderr = result.stderr.strip()
@@ -3132,8 +3132,8 @@ Skóre:          {s['score']:.1f}
                     stdout=subprocess.PIPE, 
                     stderr=subprocess.STDOUT,
                     text=True,
-                    cwd='/home/narbon/Aplikácie/tws-webapp',
-                    env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')}
+                    cwd=BASE_DIR,
+                    env={**os.environ, 'PATH': f"{VENV_BIN}:" + os.environ.get('PATH', '')}
                 )
                 
                 output_lines = []
@@ -3484,7 +3484,7 @@ Skóre:          {s['score']:.1f}
                 result = subprocess.run(
                     ['python3', script_path, str(self.port_var.get()), self.symbol_var.get(), right], 
                     capture_output=True, text=True, timeout=45,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 
                 if result.returncode == 0 and result.stdout.strip():
@@ -3576,8 +3576,8 @@ Skóre:          {s['score']:.1f}
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
-                                       cwd='/home/narbon/Aplikácie/tws-webapp',
-                                       env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')})
+                                       cwd=BASE_DIR,
+                                       env={**os.environ, 'PATH': f"{VENV_BIN}:" + os.environ.get('PATH', '')})
                 
                 output = result.stdout + result.stderr
                 self.root.after(0, lambda: self.display_hedge_result(output))
@@ -3806,8 +3806,8 @@ PRE NASTAVENIE V BROKERI ({self.symbol_var.get()} {opt_type}):
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                       cwd='/home/narbon/Aplikácie/tws-webapp',
-                                       env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')})
+                                       cwd=BASE_DIR,
+                                       env={**os.environ, 'PATH': f"{VENV_BIN}:" + os.environ.get('PATH', '')})
                 
                 if result.returncode == 0:
                     try:
@@ -3843,8 +3843,8 @@ PRE NASTAVENIE V BROKERI ({self.symbol_var.get()} {opt_type}):
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                       cwd='/home/narbon/Aplikácie/tws-webapp',
-                                       env={**os.environ, 'PATH': '/home/narbon/Aplikácie/tws-webapp/venv/bin:' + os.environ.get('PATH', '')})
+                                       cwd=BASE_DIR,
+                                       env={**os.environ, 'PATH': f"{VENV_BIN}:" + os.environ.get('PATH', '')})
                 
                 output = result.stdout + result.stderr
                 self.root.after(0, lambda: self.display_monitor_result(output))
@@ -3954,7 +3954,7 @@ TIP: Pre testovanie používajte Paper Trading (port 7497)
                 result = subprocess.run(
                     ['python3', script_path, str(port)], 
                     capture_output=True, text=True, timeout=15,
-                    cwd='/home/narbon/Aplikácie/tws-webapp'
+                    cwd=BASE_DIR
                 )
                 
                 if result.returncode == 0 and result.stdout.strip():

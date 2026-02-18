@@ -35,6 +35,13 @@ SCORE_FILTER_MAP = {
     "≥80 %": 80.0
 }
 
+ADX_FILTER_MAP = {
+    "Žiadny filter": 0.0,
+    "≥20 (Mierny)": 20.0,
+    "≥25 (Silný)": 25.0,
+    "≥30 (V. silný)": 30.0
+}
+
 LOG_FIELDNAMES = [
     'EntryTime', 'Symbol', 'Timeframe', 'EntryPrice',
     'RSI', 'PercentB', 'SignalType', 'ExitPrice', 'FinalPL',
@@ -948,6 +955,11 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
     filter_threshold = 0.0
     if hasattr(state, 'hunter_score_filter_var'):
         filter_threshold = SCORE_FILTER_MAP.get(state.hunter_score_filter_var.get(), 0.0)
+    
+    adx_filter_threshold = 0.0
+    if hasattr(state, 'hunter_adx_filter_var'):
+        adx_filter_threshold = ADX_FILTER_MAP.get(state.hunter_adx_filter_var.get(), 0.0)
+    
     background_interval = getattr(state, 'hunter_background_refresh_interval', 3600)
 
     # NOVÉ: Zachytenie hodnôt z Tkinter premenných pred spustením thready (Thread Safety)
@@ -976,635 +988,452 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
 
     def run():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        py = os.path.join(root, 'venv', 'bin', 'python3')
-        if not os.path.exists(py): py = sys.executable
+        py = sys.executable
         scr = os.path.join(root, 'scripts', 'tws_fetch_history.py')
         port = port_val
 
         for sym in symbols:
-            # Kontrola či už nebeží novší sken
-            if getattr(state, 'hunter_session_id', 0) != session_id:
-                print(f"🛑 Hunter: Zastavujem starý sken (Session {session_id})")
-                return
-
-            # Väčšia pauza pre stabilitu TWS pri hromadnom skene
-            if not force_symbol and len(symbols) > 1:
-                time.sleep(0.8)
-
+            # Ak je vynútený len jeden symbol, ostatné okamžite preskočíme
             if force_symbol and sym != force_symbol:
                 continue
-            
-            # Kontrola počas behu: Ak už symbol nie je vybratý, preskočíme ho
-            if sym not in selected_symbols_set:
-                continue
-            
-            # Kontrola či root ešte existuje
-            if not state.root or not state.root.winfo_exists():
-                return
 
-            next_ts = state.hunter_next_update.get(sym, 0)
-            if not force and not force_symbol and time.time() < next_ts:
-                continue
-
-            last_scores = getattr(state, 'hunter_last_scores', {})
-            last_updates = getattr(state, 'hunter_last_update', {})
-            last_score = last_scores.get(sym)
-            last_update = last_updates.get(sym, 0)
-            if not (force or force_symbol == sym) and filter_threshold > 0 and last_score is not None and last_score < filter_threshold and (time.time() - last_update) < background_interval:
-                continue
-
-            # --- 1. SŤAHOVANIE DENNÝCH DÁT AKO PRVÉ ---
-            # 1. Stiahneme '1 day' dáta pre:
-            #    a) Pred-filter (Smart Filter)
-            #    b) Výpočet MA200
-            #    c) Výpočet Pivotov (ak nie je weekly)
-            
-            pivots = None
-            day_candles = None
-            ma200_info = None
-            is_skipped = False
-            
-            try:
-                # Použijeme 252 D (pracovný rok) pre lepšiu kompatibilitu s TWS a vynútime čerstvé dáta
-                cmd_d = [py, scr, '--symbol', sym, '--barSize', '1 day', '--duration', '252 D', '--port', port, '--force']
-                
-                res_d = subprocess.run(cmd_d, capture_output=True, text=True, timeout=60, cwd=root)
-                if res_d.returncode == 0:
-                    d_data = json.loads(res_d.stdout.strip())
-                    if d_data.get('success'):
-                        day_candles = d_data['candles']
-                        if day_candles and len(day_candles) >= 20:
-                            # --- SMART FILTER ---
-                            # 1. RSI
-                            d_rsi = calculate_rsi(day_candles, 14)
-                            d_pdi, d_mdi, d_adx = calculate_adx_dmi(day_candles, 14)
-                            # 2. Bollinger Middle (SMA20)
-                            d_bb = calculate_bb(day_candles)
-                            d_ma20 = d_bb['mid'] if d_bb else None
-                            d_close = day_candles[-1]['close']
-                            # 3. MA200
-                            ma200_info = calculate_ma200_metrics(day_candles)
-                            d_ma200 = ma200_info.get('value') if ma200_info else None
-
-                            # Ak nie je vynútený refresh jedného symbolu, aplikujeme filter
-                            if not (force or force_symbol):
-                                is_interesting = False
-                                
-                                # A) RSI Extrém
-                                if d_rsi < 40 or d_rsi > 60:
-                                    is_interesting = True
-                                
-                                # B) Blízko BB Stredu (SMA20) - do 1.5%
-                                if d_ma20 and abs((d_close - d_ma20) / d_ma20) < 0.015:
-                                    is_interesting = True
-                                    
-                                # C) Blízko MA200 - do 2.0%
-                                if d_ma200 and abs((d_close - d_ma200) / d_ma200) < 0.02:
-                                    is_interesting = True
-                                
-                                if not is_interesting:
-                                    # Symbol je nudný, preskakujeme ostatné TF, ale stále updatneme UI
-                                    is_skipped = True
-                        else:
-                            print(f"⚠️ {sym}: Málo denných sviečok z TWS ({len(day_candles) if day_candles else 0}/20)")
-                    else:
-                        print(f"❌ {sym}: TWS chyba denného grafu: {d_data.get('error')}")
-            except Exception as e:
-                print(f"❌ Smart Filter Error {sym}: {e}")
-
-            # --- 2. ZÍSKANIE PIVOT DATA (Ak treba weekly) ---
-            current_tf = current_tf_val
-            if not is_skipped and "week" in current_tf:
+            print(f"🔄 Hunter: Spracovávam {sym}...")
+            # Vytvoríme/aktualizujeme riadok v tabuľke hneď, aby užívateľ videl, že pracujeme
+            def show_loading(s=sym):
                 try:
-                    cmd_p = [py, scr, '--symbol', sym, '--barSize', '1 week', '--duration', '3 M', '--port', port]
-                    res_p = subprocess.run(cmd_p, capture_output=True, text=True, timeout=50, cwd=root)
-                    if res_p.returncode == 0:
-                        p_data = json.loads(res_p.stdout.strip())
-                        if p_data.get('success') and len(p_data['candles']) >= 2:
-                             pivots = calculate_pivots(p_data['candles'][-2])
-                except Exception: pass
-            
-            # --- 3. SŤAHOVANIE OSTATNÝCH TF ---
-            results_tf = {} 
-            
-            # Pridáme už stiahnuté denné dáta do results_tf
-            if day_candles:
-                 # Vypočítame indikátory pre 1 day
-                 d_rsi = calculate_rsi(day_candles, rsi_p_val)
-                 d_pdi, d_mdi, d_adx = calculate_adx_dmi(day_candles, 14)
-                 d_rvi, d_rvi_s = calculate_rvi(day_candles, rvi_p_val)
-                 d_bb = calculate_bb(day_candles)
-                 d_macd = calculate_macd(day_candles)
-                 
-                 # Stav pre 1 day
-                 d_status, d_action, d_tag = "Neutral", "Čakať", ""
-                 if is_skipped:
-                     d_status, d_tag = "💤 Nudný (Denný)", "zone_neutral"
-                 elif d_rsi < 30: d_status, d_tag = "🔥 PREPREDANÉ", "alert"
-                 elif d_rsi > 70: d_status, d_tag = "❄️ PREKÚPENÉ", "alert"
-                 
-                 results_tf['1 day'] = {
-                     'rsi': d_rsi, 'rvi': d_rvi, 'rvi_s': d_rvi_s, 
-                     'adx': d_adx, 'pdi': d_pdi, 'mdi': d_mdi,
-                     'price': day_candles[-1]['close'], 
-                     'status': d_status, 'action': d_action, 'tag': d_tag,
-                     'bb': d_bb, 'macd': d_macd,
-                     'candles': day_candles
-                 }
+                    parent_id = next((item for item in tree.get_children() if tree.item(item, 'text') == s), None)
+                    if not parent_id:
+                        tree.insert('', tk.END, text=s, values=("Sťahujem...", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—"))
+                    else:
+                        tree.item(parent_id, values=("Sťahujem...", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—"))
+                except: pass
+            state.root.after(0, show_loading)
 
-            if not is_skipped:
-                for tf in tfs:
-                    if tf == '1 day': continue # Už máme
-                    dur = "10 D"
-                    if "15 mins" in tf:
-                        dur = "5 D"
-                    elif "1 hour" in tf:
-                        dur = "25 D"
-                    elif "4 hours" in tf:
-                        dur = "60 D"
-                    elif tf == "1 day":
-                        dur = "252 D"
-                    elif "week" in tf:
-                        dur = "2 Y"
-                    elif "day" in tf:
-                        dur = "252 D"
+            try:
+                # Kontrola či už nebeží novší sken
+                if getattr(state, 'hunter_session_id', 0) != session_id:
+                    print(f"🛑 Hunter: Zastavujem starý sken (Session {session_id})")
+                    return
 
+                # Väčšia pauza pre stabilitu TWS pri hromadnom skene
+                if not force_symbol and len(symbols) > 1:
+                    time.sleep(0.8)
+
+                # Kontrola počas behu: Ak už symbol nie je vybratý, preskočíme ho
+                if sym not in selected_symbols_set:
+                    continue
+                
+                # Kontrola či root ešte existuje
+                if not state.root or not state.root.winfo_exists():
+                    return
+
+                next_ts = state.hunter_next_update.get(sym, 0)
+                if not force and not force_symbol and time.time() < next_ts:
+                    continue
+
+                last_scores = getattr(state, 'hunter_last_scores', {})
+                last_updates = getattr(state, 'hunter_last_update', {})
+                last_score = last_scores.get(sym)
+                last_update = last_updates.get(sym, 0)
+                if not (force or force_symbol == sym) and filter_threshold > 0 and last_score is not None and last_score < filter_threshold and (time.time() - last_update) < background_interval:
+                    continue
+
+                # --- 1. SŤAHOVANIE DENNÝCH DÁT AKO PRVÉ ---
+                pivots = None
+                day_candles = None
+                ma200_info = None
+                is_skipped = False
+                
+                try:
+                    # Skrátené na 60 D pre rýchlosť a spoľahlivosť
+                    cmd_d = [py, scr, '--symbol', sym, '--barSize', '1 day', '--duration', '60 D', '--port', port, '--force']
+                    print(f"DEBUG: Spúšťam: {' '.join(cmd_d)}")
+                    
+                    # Použijeme communicate() namiesto run() pre lepšiu kontrolu nad buffermi
+                    process = subprocess.Popen(cmd_d, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root)
                     try:
-                        cmd = [py, scr, '--symbol', sym, '--barSize', tf, '--duration', dur, '--port', port]
-                        if force or force_symbol:
-                            cmd.append('--force')
-                        
-                        res = subprocess.run(cmd, capture_output=True, text=True, timeout=50, cwd=root)
-                        
-                        if res.returncode == 0:
-                            data = json.loads(res.stdout.strip())
-                            if data.get('success'):
-                                c = data['candles']
-                                if c:
-                                    r_p, rv_p = rsi_p_val, rvi_p_val
-                                    
-                                    rsi = calculate_rsi(c, r_p)
-                                    pdi, mdi, adx = calculate_adx_dmi(c, 14)
-                                    rvi, rvi_s = calculate_rvi(c, rv_p)
-                                    
-                                    # NOVÉ: Bollinger a MACD
-                                    bb_data = calculate_bb(c)
-                                    macd_data = calculate_macd(c)
-                                    
-                                    tf_status, tf_action, tf_tag = "Neutral", "Čakať", ""
-                                    
-                                    # EXTREME OVERWEIGHT logika
-                                    if rsi < 30 and bb_data and c[-1]['close'] <= bb_data['lower']:
-                                        tf_status, tf_tag = "⚠️ EXTREME OVERWEIGHT", "alert"
-                                    elif rsi < 30: 
-                                        tf_status, tf_tag = "🔥 PREPREDANÉ", "alert"
-                                    elif rsi > 70:
-                                        tf_status, tf_tag = "❄️ PREKÚPENÉ", "alert"
-                                    
-                                    # CONFIRMED logika
-                                    if rvi > rvi_s:
-                                        if macd_data and macd_data['is_cross']:
-                                            tf_action, tf_tag = "🚀 CONFIRMED BUY", "buy"
-                                        else:
-                                            tf_action, tf_tag = "✅ BUY", "buy"
-                                    elif rsi > 70 and rvi < rvi_s:
-                                        tf_action, tf_tag = "🔻 SHORT", "short"
+                        stdout, stderr = process.communicate(timeout=65)
+                        print(f"DEBUG: Skript skončil. Stdout: '{stdout.strip()[:100]}...'")
+                        if stderr: print(f"DEBUG STDERR: {stderr}")
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        print(f"❌ {sym}: Timeout pri sťahovaní denných dát")
+                        state.root.after(0, lambda: tree.item(next(i for i in tree.get_children() if tree.item(i, 'text') == sym), values=("❌ TIMEOUT", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—")))
+                        continue
 
-                                    results_tf[tf] = {
-                                        'rsi': rsi, 'rvi': rvi, 'rvi_s': rvi_s, 
-                                        'adx': adx, 'pdi': pdi, 'mdi': mdi,
-                                        'price': c[-1]['close'], 
-                                        'status': tf_status, 'action': tf_action, 'tag': tf_tag,
-                                        'bb': bb_data, 'macd': macd_data,
-                                        'candles': c
-                                    }
-                    except Exception as e:
-                        print(f"❌ Error fetching {sym} {tf}: {e}")
+                    if process.returncode == 0:
+                        d_data = json.loads(stdout.strip())
+                        if d_data.get('success'):
+                            day_candles = d_data['candles']
+                            if day_candles and len(day_candles) >= 20:
+                                # ... existujúca logika ...
+                                d_rsi = calculate_rsi(day_candles, 14)
+                                d_pdi, d_mdi, d_adx = calculate_adx_dmi(day_candles, 14)
+                                d_bb = calculate_bb(day_candles)
+                                d_ma20 = d_bb['mid'] if d_bb else None
+                                d_close = day_candles[-1]['close']
+                                ma200_info = calculate_ma200_metrics(day_candles)
+                                d_ma200 = ma200_info.get('value') if ma200_info else None
 
-            # Vyhodnotenie po získaní všetkých TF pre daný symbol
-            if not results_tf: continue
-
-            main_tf = current_tf_val
-            if main_tf not in results_tf: 
-                 if results_tf: 
-                     main_tf = list(results_tf.keys())[0]
-                 else:
-                     continue
-            
-            main_data = results_tf[main_tf]
-            price = main_data['price']
-
-            daily_info = results_tf.get('1 day')
-            
-            # MA200 info už môžeme mať z filtra, ak nie, skúsime dopočítať
-            if not ma200_info and daily_info and daily_info.get('candles'):
-                ma200_info = calculate_ma200_metrics(daily_info['candles'])
-
-            ma200_value = ma200_info.get('value') if ma200_info else None
-            has_ma = ma200_value is not None and ma200_value > 0
-            price_above_ma = price >= ma200_value if has_ma else True
-            is_bearish_trend = has_ma and price < ma200_value
-            trend_text = "—"
-            trend_tag = None
-            trend_label = "—"
-            if has_ma:
-                dist_pct = ((price - ma200_value) / ma200_value) * 100
-                trend_label = 'Býk' if price_above_ma else 'Bear'
-                trend_text = f"{trend_label} {dist_pct:+.1f}%"
-                if is_bearish_trend:
-                    trend_tag = 'trend_bear'
-                else:
-                    trend_tag = 'trend_breakout' if ma200_info.get('cross_up') and price_above_ma else 'trend_bull'
-            
-            # Logika Súladu a finálneho signálu pre Rodiča
-            status, action, tag = "Neutral", "Čakať", ""
-            
-            rsi_vals = {tf: results_tf.get(tf, {}).get('rsi', 50.0) for tf in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]}
-            
-            align_buy_short = rsi_vals['15 mins'] < 35 and rsi_vals['1 hour'] < 35
-            align_buy_long  = rsi_vals['4 hours'] < 40 and rsi_vals['1 day'] < 45
-            align_short_short = rsi_vals['15 mins'] > 65 and rsi_vals['1 hour'] > 65
-            align_short_long  = rsi_vals['4 hours'] > 60 and rsi_vals['1 day'] > 55
-
-            # Určenie tagu rodiča
-            if align_buy_short and align_buy_long: tag = "align_perfect"
-            elif align_buy_long: tag = "align_long"
-            elif align_buy_short: tag = "align_short"
-            elif align_short_short and align_short_long: tag = "align_perfect_s"
-            elif align_short_long: tag = "align_long_s"
-            elif align_short_short: tag = "align_short_s"
-
-            # Výpočet Pivotov (z denného grafu ak ešte nemáme)
-            p_dist_str = ""
-            is_near_support = False
-            
-            if not pivots and '1 day' in results_tf and len(results_tf['1 day']['candles']) >= 2:
-                # Ak sme predtým nerobili extra fetch (napr. pre 4H graf stačia denné pivoty)
-                # Tak ich vypočítame tu z načítaných denných dát
-                pivots = calculate_pivots(results_tf['1 day']['candles'][-2])
-            
-            if pivots and '1 day' in results_tf and len(results_tf['1 day']['candles']) >= 2:
-                # candles[-1] je dnes, candles[-2] je včera (uzavretý deň)
-                # Tento blok bol pôvodne len na výpočet, teraz je to pokryté vyššie, 
-                # ale nechávame logiku pre istotu, ak by pivots prišli z extra fetchu.
-                pass 
-                
-            if pivots:
-                # Vzdialenosť k najbližšiemu Supportu/Pivotu
-                price = main_data['price']
-                targets = {'P': pivots['P'], 'S1': pivots['S1'], 'S2': pivots['S2']}
-                
-                min_dist_pct = 999.0
-                best_level = ""
-                for name, val in targets.items():
-                    dist_pct = ((price - val) / val) * 100
-                    if abs(dist_pct) < abs(min_dist_pct):
-                        min_dist_pct = dist_pct
-                        best_level = name
-                
-                best_val = targets[best_level]
-                p_dist_str = f"{best_level[0]} {best_val:.2f}/{min_dist_pct:+.2f}%" if best_level else "—"
-                if abs(min_dist_pct) < 0.5: # Ak sme bližšie než 0.5% k hladine
-                    is_near_support = best_level in ('S1', 'S2', 'P')
-
-            # Signál na rodičovi
-            is_oversold = any(v < 30 for v in rsi_vals.values())
-            is_overbought = any(v > 70 for v in rsi_vals.values())
-            
-            # --- VÝPOČET SWING SKÓRE (na hlavnom TF) ---
-            main_bb = main_data.get('bb')
-            main_macd = main_data.get('macd')
-            
-            # Získame best_level a min_dist_pct pre skóre
-            score_dist = 99.0
-            score_level = ""
-            if pivots:
-                for name, val in {'P': pivots['P'], 'S1': pivots['S1'], 'S2': pivots['S2']}.items():
-                    d_pct = ((price - val) / val) * 100
-                    if abs(d_pct) < abs(score_dist):
-                        score_dist = d_pct
-                        score_level = name
-
-            swing_score, breakdown, zone = vypocitaj_swing_skore(
-                main_data['rsi'], price, main_bb, 
-                main_data['rvi'], main_data['rvi_s'], 
-                main_macd, score_dist, score_level
-            )
-            adjusted_score = swing_score
-            if has_ma:
-                if is_bearish_trend:
-                    adjusted_score *= 0.6
-                elif ma200_info.get('slope_down'):
-                    adjusted_score *= 0.9
-            adjusted_score = max(0.0, min(10.0, adjusted_score))
-            score_pct = score_to_percent(adjusted_score)
-            active_key = (sym, main_tf)
-            active_signal = state.hunter_active_signals.get(active_key, None)
-            pl_signal_value = ""
-            pl_tag = None
-            if breakdown:
-                breakdown_percent = {k: v * 10 for k, v in breakdown.items()}
-                breakdown_text = ", ".join(f"{k}:{perc:.0f}%" for k, perc in breakdown_percent.items())
-            else:
-                breakdown_text = "Žiadny príspevok"
-
-            if not hasattr(state, 'hunter_last_scores'):
-                state.hunter_last_scores = {}
-            if not hasattr(state, 'hunter_last_update'):
-                state.hunter_last_update = {}
-            if not hasattr(state, 'hunter_last_breakdown'):
-                state.hunter_last_breakdown = {}
-            state.hunter_last_scores[sym] = score_pct
-            state.hunter_last_update[sym] = time.time()
-            state.hunter_last_breakdown[sym] = breakdown_text
-
-            score_tag = 'score_0_19'
-            if score_pct >= 80:
-                score_tag = "score_80_100"
-            elif score_pct >= 50:
-                score_tag = "score_50_79"
-            elif score_pct >= 20:
-                score_tag = "score_20_49"
-
-            score_text = f"Skóre: {score_pct:.0f} %"
-            pct_b_value = main_bb['pct_b'] if main_bb else None
-            pct_b_text = f"{pct_b_value:.1f}%" if pct_b_value is not None else "—"
-            if pct_b_value is None:
-                pctb_tag = 'pctb_none'
-            elif pct_b_value < 25:
-                pctb_tag = 'pctb_low'
-            elif pct_b_value > 80:
-                pctb_tag = 'pctb_high'
-            else:
-                pctb_tag = 'pctb_mid'
-            pivot_label = p_dist_str if p_dist_str else "—"
-            pivot_bb_text = pivot_label
-            interval = get_dynamic_interval(score_pct, zone, pct_b_value)
-            next_update_time = time.time() + interval
-            state.hunter_next_update[sym] = next_update_time
-            next_update_text = format_mmss(interval)
-
-            strong_macd = bool(main_macd and main_macd.get('is_cross'))
-            rvi_bull = main_data['rvi'] > main_data['rvi_s']
-            rvi_bear = main_data['rvi'] < main_data['rvi_s']
-            macd_falling = bool(main_macd and main_macd.get('macd') < main_macd.get('signal', 0))
-
-            def bearish_label():
-                return "Bearish Rebound" if score_pct >= 40 else "Sledovať rezistenciu"
-
-            trend_breakout = has_ma and ma200_info and ma200_info.get('cross_up') and price_above_ma
-            action = "Neutral"
-            if trend_breakout:
-                action = "Trend Breakout"
-            elif is_bearish_trend:
-                action = bearish_label()
-            elif zone == 'hunt':
-                action = "🚀 STRONG BUY" if strong_macd or rvi_bull else "⏳ SLEDOVAŤ AKUMULÁCIU"
-            elif zone == 'hold':
-                action = "⏳ DRŽAŤ / NEUTRÁL"
-            elif zone == 'risk':
-                action = "💰 VÝSTUP / TAKE PROFIT" if (rvi_bear or macd_falling) else "⚠️ RIZIKO / BLOKUJ BUY"
-            else:
-                if score_pct >= 80:
-                    action = "🚀 RAKETA (Strong Buy)"
-                elif score_pct >= 50:
-                    action = "✅ VHODNÝ VSTUP"
-                elif score_pct >= 20:
-                    action = "⏳ ČAKAŤ (Sledovať)"
-                else:
-                    action = "Neutral"
-
-            entry_actions = {"🚀 STRONG BUY", "✅ VHODNÝ VSTUP", "Trend Breakout"}
-            if action in entry_actions:
-                if not active_signal:
-                    entry_time = log_signal_entry(
-                        sym, main_tf, price,
-                        main_data['rsi'], pct_b_value,
-                        action,
-                        zone=zone,
-                        trend=trend_label,
-                        score_pct=score_pct,
-                        macd_cross=bool(main_macd and main_macd.get('is_cross')),
-                        rvi_gt_sig=rvi_bull,
-                        pivot_dist=score_dist,
-                        action_text=action
-                    )
-                    state.hunter_active_signals[active_key] = {
-                        'entry_price': price,
-                        'entry_time': entry_time,
-                        'signal_type': action
-                    }
-                    active_signal = state.hunter_active_signals[active_key]
-            else:
-                if active_signal:
-                    final_pl = ((price - active_signal['entry_price']) / active_signal['entry_price']) * 100 if active_signal['entry_price'] else 0.0
-                    log_signal_exit(active_signal['entry_time'], price, final_pl)
-                    del state.hunter_active_signals[active_key]
-                    active_signal = None
-
-            if active_signal and active_signal.get('entry_price'):
-                pl_pct = ((price - active_signal['entry_price']) / active_signal['entry_price']) * 100
-                pl_signal_value = f"{pl_pct:+.2f}%"
-                pl_tag = 'pl_profit' if pl_pct >= 0 else 'pl_loss'
-
-            zone_tag = f"zone_{zone}" if zone else "zone_neutral"
-            if zone_tag not in ('zone_hunt', 'zone_hold', 'zone_risk', 'zone_neutral'):
-                zone_tag = 'zone_neutral'
-
-            # Priorita stavu (EXTREME OVERWEIGHT má prednosť pred PREPREDANÉ)
-            is_extreme = any(d.get('status') == "⚠️ EXTREME OVERWEIGHT" for d in results_tf.values())
-            if is_extreme:
-                status = "⚠️ EXTREME OVERWEIGHT"
-            elif is_oversold:
-                status = "🔥 PREPREDANÉ"
-            elif is_overbought:
-                status = "❄️ PREKÚPENÉ"
-            else:
-                status = "Neutral"
-
-            main_candles = main_data.get('candles')
-            atr_value = calculate_atr(main_candles) if main_candles else None
-
-            summary = {
-                'symbol': sym,
-                'price': price,
-                'score_pct': score_pct,
-                'score_level': score_level,
-                'score_dist': score_dist,
-                'zone': zone,
-                'action': action,
-                'status': status,
-                'trend_text': trend_text,
-                'trend_label': trend_label,
-                'trend_breakout': trend_breakout,
-                'has_ma': has_ma,
-                'ma200_value': ma200_value,
-                'pct_b': main_bb.get('pct_b') if main_bb else None,
-                'pivot_label': pivot_bb_text,
-                'pivots': pivots,
-                'main_bb': main_bb,
-                'macd': main_macd,
-                'atr': atr_value,
-                'rsi': main_data['rsi'],
-                'adx': main_data.get('adx', 0.0),
-                'pdi': main_data.get('pdi', 0.0),
-                'mdi': main_data.get('mdi', 0.0),
-                'rvi': main_data['rvi'],
-                'rvi_s': main_data['rvi_s'],
-                'breakdown': breakdown_text,
-                'next_update': next_update_text,
-                'zone_tag': zone_tag,
-                'timeframe': main_tf
-            }
-
-            strategy_label, strategy_reason = recommend_strategy(summary)
-            summary['strategy_label'] = strategy_label
-            summary['strategy_reason'] = strategy_reason
-            opt_label, opt_reason = recommend_option_strategy(summary)
-            summary['option_strategy'] = opt_label
-            summary['option_reason'] = opt_reason
-            ml_prob = predict_ml_score(summary, getattr(state, 'hunter_model', None))
-            summary['ml_prob'] = ml_prob
-            state.hunter_symbol_summaries[sym] = summary
-
-            def update_ui(s=sym, p=price, res_tf=results_tf, st=status, ac=action, tg=tag,
-                          pct_b_cell=pct_b_text, pivot_bb=pivot_bb_text, sc_text=score_text,
-                          bk_text=breakdown_text, z_tag=zone_tag, pct_tag=pctb_tag,
-                          zone_name=zone, pl_disc=pl_signal_value, pl_t=pl_tag,
-                          next_up=next_update_text, trend_val=trend_text,
-                          trend_label_val=trend_label, main_data_param=main_data,
-                          score_pct_val=score_pct, pivots_param=pivots,
-                          main_bb_param=main_bb, macd_param=main_macd,
-                          score_level_val=score_level, score_dist_val=score_dist,
-                          has_ma_param=has_ma, ma200_value_param=ma200_value,
-                          pct_b_value_param=pct_b_value, trend_breakout_flag=trend_breakout,
-                          curr_summary=summary):
-                # Nájsť rodičovský riadok
-                parent_id = None
-                for item in tree.get_children():
-                    if tree.item(item, 'text') == s:
-                        parent_id = item
-                        break
-                
-                # Zobrazenie skóre v stĺpci RSI rodiča (upravíme Treeview neskôr)
-                ml_prob = curr_summary.get('ml_prob')
-                ml_text = f"{ml_prob*100:.0f}%" if isinstance(ml_prob, (int, float)) else "—"
-                
-                # Zobrazenie stratégie v stĺpci Akcia pre rodiča
-                opt_strat = curr_summary.get('option_strategy', '—')
-                parent_action = ac
-                if opt_strat and opt_strat != '—':
-                    parent_action = f"{ac} | {opt_strat}"
-
-                vals = (
-                    f"{p:.2f}",
-                    trend_val,
-                    sc_text,
-                    f"{main_data_param.get('adx', 0):.1f}",
-                    pct_b_cell,
-                    next_up,
-                    f"{main_data_param['rvi']:.4f}",
-                    f"{main_data_param['rvi_s']:.4f}",
-                    pivot_bb,
-                    st,
-                    parent_action,
-                    ml_text,
-                    bk_text,
-                    pl_disc
-                )
-                
-                parent_tags = [score_tag]
-                if pct_tag:
-                    parent_tags.append(pct_tag)
-                if z_tag:
-                    parent_tags.append(z_tag)
-                if pl_t:
-                    parent_tags.append(pl_t)
-                if trend_tag:
-                    parent_tags.append(trend_tag)
-                if s in getattr(state, 'hunter_pinned_symbols', []):
-                    parent_tags.append('pinned')
-                parent_tags.append('header')
-                state.hunter_base_tags[s] = list(parent_tags)
-                if tg:
-                    parent_tags.insert(0, tg)
-
-                if parent_id:
-                    tree.item(parent_id, values=vals, tags=parent_tags)
-                else:
-                    parent_id = tree.insert('', tk.END, text=s, values=vals, tags=parent_tags, open=False)
-
-                # Aktualizovať deti (Timeframy)
-                for child in tree.get_children(parent_id):
-                    tree.delete(child)
-
-                # Pridať detský riadok so stratégiou
-                opt_strat = curr_summary.get('option_strategy', '—')
-                opt_reason = curr_summary.get('option_reason', '—')
-                if opt_strat and opt_strat != '—':
-                    tree.insert(parent_id, tk.END, text="  🎯 Stratégia",
-                                values=("", "", "", "", "", "", "", "", "", opt_strat, opt_reason, "", "", ""),
-                                tags=('header',))
-                
-                for tf_name in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]:
-                    if tf_name in res_tf:
-                        d = res_tf[tf_name]
-                        # Zobraziť TF vždy, ak je to hlavný TF, inak rešpektovať checkboxy (pre 1d/1w)
-                        if tf_name in ('1 day', '1 week') and tf_name != current_tf_val:
-                            tf_checkbox = state.hunter_tf_vars.get(tf_name) if hasattr(state, 'hunter_tf_vars') else None
-                            if tf_checkbox and not tf_checkbox.get():
-                                continue
-                        bb_value = f"{d['bb']['pct_b']:.1f}%" if d.get('bb') else "—"
-                        child_action = d['action']
-                        pctb_child = None
-                        if bb_value != "—":
-                            try:
-                                pctb_child = float(bb_value.replace('%', ''))
-                            except ValueError:
-                                pctb_child = None
-                        if zone_name == 'risk':
-                            child_action = "⚠️ STOP"
+                                if not (force or force_symbol):
+                                    is_interesting = False
+                                    if d_rsi < 40 or d_rsi > 60: is_interesting = True
+                                    if d_ma20 and abs((d_close - d_ma20) / d_ma20) < 0.015: is_interesting = True
+                                    if d_ma200 and abs((d_close - d_ma200) / d_ma200) < 0.02: is_interesting = True
+                                    if not is_interesting: is_skipped = True
+                            else:
+                                print(f"⚠️ {sym}: Málo denných sviečok z TWS")
+                                state.root.after(0, lambda: tree.item(next(i for i in tree.get_children() if tree.item(i, 'text') == sym), values=("⚠️ MÁLO DÁT", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—")))
                         else:
-                            if "BUY" in child_action.upper():
-                                child_action = "Čakať"
-                            if zone_name == 'hunt' and pctb_child is not None and pctb_child < 30 and ("BUY" in d['action'].upper() or "STRONG" in d['action'].upper()):
-                                child_action = "🚀 STRONG BUY"
-                        child_tags = [d['tag'], z_tag]
-                        if pctb_child and pctb_child > 100:
-                            child_tags.append('pctb_over')
-                        pivot_label = "S" if zone_name != 'risk' else "P"
-                        trend_letter = trend_label if trend_label != "—" else ""
-                        tree.insert(parent_id, tk.END, text=f"  {tf_name}",
-                                    values=(
-                                        "",
-                                        trend_letter,
-                                        f"{d['rsi']:.1f}",
-                                        f"{d.get('adx', 0):.1f}",
-                                        bb_value,
-                                        "",
-                                        f"{d['rvi']:.4f}",
-                                        f"{d['rvi_s']:.4f}",
-                                        p_dist_str,
-                                        d['status'],
-                                        child_action,
-                                        "",
-                                        "",
-                                        ""
-                                    ),
-                                    tags=tuple(child_tags))
+                            err = d_data.get('error', 'Neznáma chyba TWS')
+                            print(f"❌ {sym}: TWS chyba denného grafu: {err}")
+                            state.root.after(0, lambda: tree.item(next(i for i in tree.get_children() if tree.item(i, 'text') == sym), values=(f"❌ {err[:15]}...", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—")))
+                    else:
+                        print(f"❌ {sym}: Skript zlyhal (Kód {process.returncode})")
+                        if stderr: print(f"   Stderr: {stderr.strip()}")
+                        state.root.after(0, lambda: tree.item(next(i for i in tree.get_children() if tree.item(i, 'text') == sym), values=("❌ CHYBA SKRIPTU", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—")))
+                except Exception as e:
+                    print(f"❌ Smart Filter Error {sym}: {e}")
 
-            if filter_threshold <= 0 or score_pct >= filter_threshold:
+                # --- 2. ZÍSKANIE PIVOT DATA (Ak treba weekly) ---
+                current_tf = current_tf_val
+                if not is_skipped and "week" in current_tf:
+                    try:
+                        cmd_p = [py, scr, '--symbol', sym, '--barSize', '1 week', '--duration', '3 M', '--port', port]
+                        res_p = subprocess.run(cmd_p, capture_output=True, text=True, timeout=50, cwd=root)
+                        if res_p.returncode == 0:
+                            p_data = json.loads(res_p.stdout.strip())
+                            if p_data.get('success') and len(p_data['candles']) >= 2:
+                                 pivots = calculate_pivots(p_data['candles'][-2])
+                    except Exception: pass
+                
+                # --- 3. SŤAHOVANIE OSTATNÝCH TF ---
+                results_tf = {} 
+                if day_candles:
+                     d_rsi = calculate_rsi(day_candles, rsi_p_val)
+                     d_pdi, d_mdi, d_adx = calculate_adx_dmi(day_candles, 14)
+                     d_rvi, d_rvi_s = calculate_rvi(day_candles, rvi_p_val)
+                     d_bb = calculate_bb(day_candles)
+                     d_macd = calculate_macd(day_candles)
+                     d_status, d_action, d_tag = "Neutral", "Čakať", ""
+                     if is_skipped: d_status, d_tag = "💤 Nudný (Denný)", "zone_neutral"
+                     elif d_rsi < 30: d_status, d_tag = "🔥 PREPREDANÉ", "alert"
+                     elif d_rsi > 70: d_status, d_tag = "❄️ PREKÚPENÉ", "alert"
+                     results_tf['1 day'] = {
+                         'rsi': d_rsi, 'rvi': d_rvi, 'rvi_s': d_rvi_s, 
+                         'adx': d_adx, 'pdi': d_pdi, 'mdi': d_mdi,
+                         'price': day_candles[-1]['close'], 
+                         'status': d_status, 'action': d_action, 'tag': d_tag,
+                         'bb': d_bb, 'macd': d_macd, 'candles': day_candles
+                     }
+
+                if not is_skipped:
+                    for tf in tfs:
+                        if tf == '1 day': continue
+                        dur = "10 D"
+                        if "15 mins" in tf: dur = "5 D"
+                        elif "1 hour" in tf: dur = "25 D"
+                        elif "4 hours" in tf: dur = "60 D"
+                        elif "week" in tf: dur = "2 Y"
+                        elif "day" in tf: dur = "60 D"
+
+                        try:
+                            cmd = [py, scr, '--symbol', sym, '--barSize', tf, '--duration', dur, '--port', port]
+                            if force or force_symbol: cmd.append('--force')
+                            
+                            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root)
+                            try:
+                                stdout, stderr = process.communicate(timeout=55)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                print(f"❌ {sym} {tf}: Timeout")
+                                continue
+
+                            if process.returncode == 0:
+                                data = json.loads(stdout.strip())
+                                if data.get('success'):
+                                    c = data['candles']
+                                    if c:
+                                        rsi = calculate_rsi(c, rsi_p_val)
+                                        pdi, mdi, adx = calculate_adx_dmi(c, 14)
+                                        rvi, rvi_s = calculate_rvi(c, rvi_p_val)
+                                        bb_data = calculate_bb(c)
+                                        macd_data = calculate_macd(c)
+                                        tf_status, tf_action, tf_tag = "Neutral", "Čakať", ""
+                                        if rsi < 30 and bb_data and c[-1]['close'] <= bb_data['lower']: tf_status, tf_tag = "⚠️ EXTREME OVERWEIGHT", "alert"
+                                        elif rsi < 30: tf_status, tf_tag = "🔥 PREPREDANÉ", "alert"
+                                        elif rsi > 70: tf_status, tf_tag = "❄️ PREKÚPENÉ", "alert"
+                                        if rvi > rvi_s:
+                                            if macd_data and macd_data['is_cross']: tf_action, tf_tag = "🚀 CONFIRMED BUY", "buy"
+                                            else: tf_action, tf_tag = "✅ BUY", "buy"
+                                        elif rsi > 70 and rvi < rvi_s: tf_action, tf_tag = "🔻 SHORT", "short"
+                                        results_tf[tf] = {
+                                            'rsi': rsi, 'rvi': rvi, 'rvi_s': rvi_s, 
+                                            'adx': adx, 'pdi': pdi, 'mdi': mdi,
+                                            'price': c[-1]['close'], 
+                                            'status': tf_status, 'action': tf_action, 'tag': tf_tag,
+                                            'bb': bb_data, 'macd': macd_data, 'candles': c
+                                        }
+                                    else:
+                                        print(f"❌ {sym} {tf}: TWS error: {data.get('error')}")
+                                else:
+                                    print(f"❌ {sym} {tf}: Fetch script failed (Code {res.returncode})")
+                                    if res.stderr: print(f"   Stderr: {res.stderr.strip()}")
+                            else:
+                                print(f"❌ {sym} {tf}: Subprocess return code {res.returncode}")
+                        except Exception as e: print(f"❌ Error fetching {sym} {tf}: {e}")
+
+                if not results_tf:
+                    print(f"⚠️ {sym}: Žiadne dáta na zobrazenie.")
+                    continue
+                
+                main_tf = current_tf_val
+                if main_tf not in results_tf:
+                    main_tf = list(results_tf.keys())[0]
+                
+                main_data = results_tf[main_tf]
+                price = main_data['price']
+                if not ma200_info and results_tf.get('1 day'):
+                    ma200_info = calculate_ma200_metrics(results_tf['1 day']['candles'])
+
+                ma200_value = ma200_info.get('value') if ma200_info else None
+                has_ma = ma200_value is not None and ma200_value > 0
+                price_above_ma = price >= ma200_value if has_ma else True
+                is_bearish_trend = has_ma and price < ma200_value
+                trend_text, trend_tag, trend_label = "—", None, "—"
+                if has_ma:
+                    dist_pct = ((price - ma200_value) / ma200_value) * 100
+                    trend_label = 'Býk' if price_above_ma else 'Bear'
+                    trend_text = f"{trend_label} {dist_pct:+.1f}%"
+                    trend_tag = 'trend_bear' if is_bearish_trend else ('trend_breakout' if ma200_info.get('cross_up') and price_above_ma else 'trend_bull')
+                
+                status, action, tag = "Neutral", "Čakať", ""
+                rsi_vals = {tf: results_tf.get(tf, {}).get('rsi', 50.0) for tf in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]}
+                align_buy_short = rsi_vals['15 mins'] < 35 and rsi_vals['1 hour'] < 35
+                align_buy_long  = rsi_vals['4 hours'] < 40 and rsi_vals['1 day'] < 45
+                align_short_short = rsi_vals['15 mins'] > 65 and rsi_vals['1 hour'] > 65
+                align_short_long  = rsi_vals['4 hours'] > 60 and rsi_vals['1 day'] > 55
+
+                if align_buy_short and align_buy_long: tag = "align_perfect"
+                elif align_buy_long: tag = "align_long"
+                elif align_buy_short: tag = "align_short"
+                elif align_short_short and align_short_long: tag = "align_perfect_s"
+                elif align_short_long: tag = "align_long_s"
+                elif align_short_short: tag = "align_short_s"
+
+                p_dist_str, is_near_support = "", False
+                if not pivots and '1 day' in results_tf and len(results_tf['1 day']['candles']) >= 2:
+                    pivots = calculate_pivots(results_tf['1 day']['candles'][-2])
+                
+                if pivots:
+                    targets = {'P': pivots['P'], 'S1': pivots['S1'], 'S2': pivots['S2']}
+                    min_dist_pct, best_level = 999.0, ""
+                    for name, val in targets.items():
+                        dist_pct = ((price - val) / val) * 100
+                        if abs(dist_pct) < abs(min_dist_pct):
+                            min_dist_pct = dist_pct
+                            best_level = name
+                    best_val = targets[best_level]
+                    p_dist_str = f"{best_level[0]} {best_val:.2f}/{min_dist_pct:+.2f}%" if best_level else "—"
+                    if abs(min_dist_pct) < 0.5: is_near_support = best_level in ('S1', 'S2', 'P')
+
+                is_oversold = any(v < 30 for v in rsi_vals.values())
+                is_overbought = any(v > 70 for v in rsi_vals.values())
+                main_bb = main_data.get('bb')
+                main_macd = main_data.get('macd')
+                score_dist, score_level = 99.0, ""
+                if pivots:
+                    for name, val in {'P': pivots['P'], 'S1': pivots['S1'], 'S2': pivots['S2']}.items():
+                        d_pct = ((price - val) / val) * 100
+                        if abs(d_pct) < abs(score_dist):
+                            score_dist = d_pct
+                            score_level = name
+
+                swing_score, breakdown, zone = vypocitaj_swing_skore(main_data['rsi'], price, main_bb, main_data['rvi'], main_data['rvi_s'], main_macd, score_dist, score_level)
+                adjusted_score = swing_score
+                if has_ma:
+                    if is_bearish_trend: adjusted_score *= 0.6
+                    elif ma200_info.get('slope_down'): adjusted_score *= 0.9
+                adjusted_score = max(0.0, min(10.0, adjusted_score))
+                score_pct = score_to_percent(adjusted_score)
+                active_key = (sym, main_tf)
+                active_signal = state.hunter_active_signals.get(active_key, None)
+                pl_signal_value, pl_tag = "", None
+                if breakdown:
+                    breakdown_percent = {k: v * 10 for k, v in breakdown.items()}
+                    breakdown_text = ", ".join(f"{k}:{perc:.0f}%" for k, perc in breakdown_percent.items())
+                else: breakdown_text = "Žiadny príspevok"
+
+                if not hasattr(state, 'hunter_last_scores'): state.hunter_last_scores = {}
+                if not hasattr(state, 'hunter_last_update'): state.hunter_last_update = {}
+                if not hasattr(state, 'hunter_last_breakdown'): state.hunter_last_breakdown = {}
+                
+                state.hunter_last_scores[sym] = score_pct
+                state.hunter_last_update[sym] = time.time()
+                state.hunter_last_breakdown[sym] = breakdown_text
+
+                score_tag = 'score_0_19'
+                if score_pct >= 80: score_tag = "score_80_100"
+                elif score_pct >= 50: score_tag = "score_50_79"
+                elif score_pct >= 20: score_tag = "score_20_49"
+
+                score_text = f"Skóre: {score_pct:.0f} %"
+                pct_b_value = main_bb['pct_b'] if main_bb else None
+                pct_b_text = f"{pct_b_value:.1f}%" if pct_b_value is not None else "—"
+                if pct_b_value is None: pctb_tag = 'pctb_none'
+                elif pct_b_value < 25: pctb_tag = 'pctb_low'
+                elif pct_b_value > 80: pctb_tag = 'pctb_high'
+                else: pctb_tag = 'pctb_mid'
+                
+                pivot_label = p_dist_str if p_dist_str else "—"
+                pivot_bb_text = pivot_label
+                interval = get_dynamic_interval(score_pct, zone, pct_b_value)
+                state.hunter_next_update[sym] = time.time() + interval
+                next_update_text = format_mmss(interval)
+
+                strong_macd = bool(main_macd and main_macd.get('is_cross'))
+                rvi_bull = main_data['rvi'] > main_data['rvi_s']
+                rvi_bear = main_data['rvi'] < main_data['rvi_s']
+                macd_falling = bool(main_macd and main_macd.get('macd') < main_macd.get('signal', 0))
+
+                trend_breakout = has_ma and ma200_info and ma200_info.get('cross_up') and price_above_ma
+                action = "Neutral"
+                if trend_breakout: action = "Trend Breakout"
+                elif is_bearish_trend: action = "Bearish Rebound" if score_pct >= 40 else "Sledovať rezistenciu"
+                elif zone == 'hunt': action = "🚀 STRONG BUY" if strong_macd or rvi_bull else "⏳ SLEDOVAŤ AKUMULÁCIU"
+                elif zone == 'hold': action = "⏳ DRŽAŤ / NEUTRÁL"
+                elif zone == 'risk': action = "💰 VÝSTUP / TAKE PROFIT" if (rvi_bear or macd_falling) else "⚠️ RIZIKO / BLOKUJ BUY"
+                else:
+                    if score_pct >= 80: action = "🚀 RAKETA (Strong Buy)"
+                    elif score_pct >= 50: action = "✅ VHODNÝ VSTUP"
+                    elif score_pct >= 20: action = "⏳ ČAKAŤ (Sledovať)"
+                    else: action = "Neutral"
+
+                if action in {"🚀 STRONG BUY", "✅ VHODNÝ VSTUP", "Trend Breakout"}:
+                    if not active_signal:
+                        entry_time = log_signal_entry(sym, main_tf, price, main_data['rsi'], pct_b_value, action, zone=zone, trend=trend_label, score_pct=score_pct, macd_cross=strong_macd, rvi_gt_sig=rvi_bull, pivot_dist=score_dist, action_text=action)
+                        state.hunter_active_signals[active_key] = {'entry_price': price, 'entry_time': entry_time, 'signal_type': action}
+                        active_signal = state.hunter_active_signals[active_key]
+                else:
+                    if active_signal:
+                        final_pl = ((price - active_signal['entry_price']) / active_signal['entry_price']) * 100 if active_signal['entry_price'] else 0.0
+                        log_signal_exit(active_signal['entry_time'], price, final_pl)
+                        del state.hunter_active_signals[active_key]
+                        active_signal = None
+
+                if active_signal and active_signal.get('entry_price'):
+                    pl_pct = ((price - active_signal['entry_price']) / active_signal['entry_price']) * 100
+                    pl_signal_value, pl_tag = f"{pl_pct:+.2f}%", ('pl_profit' if pl_pct >= 0 else 'pl_loss')
+
+                zone_tag = f"zone_{zone}" if zone else "zone_neutral"
+                if zone_tag not in ('zone_hunt', 'zone_hold', 'zone_risk', 'zone_neutral'): zone_tag = 'zone_neutral'
+
+                is_extreme = any(d.get('status') == "⚠️ EXTREME OVERWEIGHT" for d in results_tf.values())
+                if is_extreme: status = "⚠️ EXTREME OVERWEIGHT"
+                elif is_oversold: status = "🔥 PREPREDANÉ"
+                elif is_overbought: status = "❄️ PREKÚPENÉ"
+                else: status = "Neutral"
+
+                atr_value = calculate_atr(main_data.get('candles'))
+                summary = {
+                    'symbol': sym, 'price': price, 'score_pct': score_pct, 'score_level': score_level, 'score_dist': score_dist,
+                    'zone': zone, 'action': action, 'status': status, 'trend_text': trend_text, 'trend_label': trend_label,
+                    'trend_breakout': trend_breakout, 'has_ma': has_ma, 'ma200_value': ma200_value,
+                    'pct_b': main_bb.get('pct_b') if main_bb else None, 'pivot_label': pivot_bb_text, 'pivots': pivots,
+                    'main_bb': main_bb, 'macd': main_macd, 'atr': atr_value, 'rsi': main_data['rsi'],
+                    'adx': main_data.get('adx', 0.0), 'pdi': main_data.get('pdi', 0.0), 'mdi': main_data.get('mdi', 0.0),
+                    'rvi': main_data['rvi'], 'rvi_s': main_data['rvi_s'], 'breakdown': breakdown_text,
+                    'next_update': next_update_text, 'zone_tag': zone_tag, 'timeframe': main_tf
+                }
+
+                summary['strategy_label'], summary['strategy_reason'] = recommend_strategy(summary)
+                summary['option_strategy'], summary['option_reason'] = recommend_option_strategy(summary)
+                # Dočasne vypnuté pre diagnostiku zaseknutia
+                summary['ml_prob'] = 0.0 # predict_ml_score(summary, getattr(state, 'hunter_model', None))
+                state.hunter_symbol_summaries[sym] = summary
+
+                def update_ui(s=sym, p=price, res_tf=results_tf, st=status, ac=action, tg=tag,
+                              pct_b_cell=pct_b_text, pivot_bb=pivot_bb_text, sc_text=score_text,
+                              bk_text=breakdown_text, z_tag=zone_tag, pct_tag=pctb_tag,
+                              zone_name=zone, pl_disc=pl_signal_value, pl_t=pl_tag,
+                              next_up=next_update_text, trend_val=trend_text,
+                              trend_label_val=trend_label, main_data_param=main_data,
+                              score_pct_val=score_pct, pivots_param=pivots,
+                              main_bb_param=main_bb, macd_param=main_macd,
+                              score_level_val=score_level, score_dist_val=score_dist,
+                              has_ma_param=has_ma, ma200_value_param=ma200_value,
+                              pct_b_value_param=pct_b_value, trend_breakout_flag=trend_breakout,
+                              curr_summary=summary):
+                    parent_id = next((item for item in tree.get_children() if tree.item(item, 'text') == s), None)
+                    ml_p = curr_summary.get('ml_prob')
+                    ml_text = f"{ml_p*100:.0f}%" if isinstance(ml_p, (int, float)) else "—"
+                    opt_strat = curr_summary.get('option_strategy', '—')
+                    parent_action = f"{ac} | {opt_strat}" if opt_strat and opt_strat != '—' else ac
+
+                    vals = (f"{p:.2f}", trend_val, sc_text, f"{main_data_param.get('adx', 0):.1f}", pct_b_cell, next_up, f"{main_data_param['rvi']:.4f}", f"{main_data_param['rvi_s']:.4f}", pivot_bb, st, parent_action, ml_text, bk_text, pl_disc)
+                    parent_tags = [score_tag]
+                    if pct_tag: parent_tags.append(pct_tag)
+                    if z_tag: parent_tags.append(z_tag)
+                    if pl_t: parent_tags.append(pl_t)
+                    if trend_tag: parent_tags.append(trend_tag)
+                    if s in getattr(state, 'hunter_pinned_symbols', []): parent_tags.append('pinned')
+                    parent_tags.append('header')
+                    if tg: parent_tags.insert(0, tg)
+
+                    if parent_id: tree.item(parent_id, values=vals, tags=parent_tags)
+                    else: parent_id = tree.insert('', tk.END, text=s, values=vals, tags=parent_tags, open=False)
+
+                    for child in tree.get_children(parent_id): tree.delete(child)
+                    if opt_strat and opt_strat != '—':
+                        tree.insert(parent_id, tk.END, text="  🎯 Stratégia", values=("", "", "", "", "", "", "", "", "", opt_strat, curr_summary.get('option_reason', '—'), "", "", ""), tags=('header',))
+                    
+                    for tf_name in ["15 mins", "1 hour", "4 hours", "1 day", "1 week"]:
+                        if tf_name in res_tf:
+                            d = res_tf[tf_name]
+                            if tf_name in ('1 day', '1 week') and tf_name != current_tf_val:
+                                if not state.hunter_tf_vars.get(tf_name).get(): continue
+                            bb_val = f"{d['bb']['pct_b']:.1f}%" if d.get('bb') else "—"
+                            pctb_child = float(bb_val.replace('%', '')) if bb_val != "—" else None
+                            c_action = "⚠️ STOP" if zone_name == 'risk' else ("🚀 STRONG BUY" if zone_name == 'hunt' and pctb_child is not None and pctb_child < 30 and "BUY" in d['action'].upper() else ("Čakať" if "BUY" in d['action'].upper() else d['action']))
+                            c_tags = [d['tag'], z_tag]
+                            if pctb_child and pctb_child > 100: c_tags.append('pctb_over')
+                            tree.insert(parent_id, tk.END, text=f"  {tf_name}", values=("", trend_label if trend_label != "—" else "", f"{d['rsi']:.1f}", f"{d.get('adx', 0):.1f}", bb_val, "", f"{d['rvi']:.4f}", f"{d['rvi_s']:.4f}", p_dist_str, d['status'], c_action, "", "", ""), tags=tuple(c_tags))
+
+                # Vždy zobrazíme symbol v tabuľke, aj keď je "skipped" (nudný), aby užívateľ videl progres
                 state.root.after(0, update_ui)
+                
+                if (filter_threshold <= 0 or score_pct >= filter_threshold) and (adx_filter_threshold <= 0 or adx_v >= adx_filter_threshold):
+                    # Tu už len potvrdíme finálny stav, ak prešiel filtrami
+                    pass
 
+            except Exception as e:
+                print(f"❌ Hunter: Chyba pri spracovaní symbolu {sym}: {e}")
+                import traceback
+                traceback.print_exc()
         def cleanup_low_symbols():
-            if filter_threshold <= 0:
+            if filter_threshold <= 0 and adx_filter_threshold <= 0:
                 return
             for item in tree.get_children():
                 if tree.parent(item):
                     continue
-                score_text = tree.set(item, 'rsi_score')
-                if extract_score_value(score_text) < filter_threshold:
-                    tree.delete(item)
+                
+                # Filter Skóre
+                if filter_threshold > 0:
+                    score_text = tree.set(item, 'rsi_score')
+                    if extract_score_value(score_text) < filter_threshold:
+                        tree.delete(item)
+                        continue
+                
+                # Filter ADX
+                if adx_filter_threshold > 0:
+                    adx_text = tree.set(item, 'adx')
+                    try:
+                        cur_adx = float(adx_text)
+                        if cur_adx < adx_filter_threshold:
+                            tree.delete(item)
+                            continue
+                    except:
+                        pass
 
         state.root.after(0, cleanup_low_symbols)
         state.root.after(0, lambda: state.hunter_status_label.config(text=f"✓ OK {datetime.now().strftime('%H:%M')}", foreground="green") if hasattr(state, 'hunter_status_label') else None)
@@ -1719,14 +1548,18 @@ def create_swing_hunter_tab(parent, state):
     # NOVÉ: Bloky symbolov
     block_f = ttk.Frame(s_frame); block_f.pack(fill='x', pady=(0, 5))
     ttk.Label(block_f, text="📂 Bloky:").pack(side='left', padx=5)
-    block_v = tk.StringVar()
+    block_v = state.hunter_selected_block
     block_combo = ttk.Combobox(block_f, textvariable=block_v, width=20, state='readonly')
     block_combo.pack(side='left', padx=5)
     
     def update_block_combo_hunter():
+        current = block_v.get()
         blocks = ["-- Vybrať blok --"] + sorted(state.symbol_blocks.keys())
         block_combo['values'] = blocks
-        block_combo.current(0)
+        if current in blocks:
+            block_combo.set(current)
+        else:
+            block_combo.current(0)
     
     update_block_combo_hunter()
 
@@ -1735,16 +1568,11 @@ def create_swing_hunter_tab(parent, state):
         if name == "-- Vybrať blok --": return
         syms = state.symbol_blocks.get(name, [])
         if syms:
-            # Pridáme symboly, ktoré tam ešte nie sú
-            changed = False
-            for s in syms:
-                if s not in state.hunter_custom_tickers:
-                    state.hunter_custom_tickers.append(s)
-                    changed = True
-            if changed:
-                state.save_settings_file()
-                update_hunter_symbols_ui(state, symbols_container)
-                refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)
+            # Správanie ako v PMCC - nahradíme aktuálne symboly symbolmi z bloku
+            state.hunter_custom_tickers = list(syms)
+            state.save_settings_file()
+            update_hunter_symbols_ui(state, symbols_container)
+            refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)
 
     block_combo.bind("<<ComboboxSelected>>", on_block_selected_hunter)
 
@@ -1779,7 +1607,26 @@ def create_swing_hunter_tab(parent, state):
     # Bindovanie Enter klávesy pre pridanie
     new_sym_ent.bind('<Return>', lambda e: add_custom_ticker(state, new_sym_ent, symbols_container))
 
+    def scan_single_symbol():
+        sym = new_sym_ent.get().strip().upper()
+        if not sym:
+            messagebox.showwarning("Swing Hunter", "Zadajte symbol pre skenovanie.")
+            return
+        
+        # Ak symbol ešte nie je v custom zozname, pridáme ho (bez info okna)
+        if not hasattr(state, 'hunter_custom_tickers'): state.hunter_custom_tickers = []
+        if sym not in state.hunter_custom_tickers:
+            state.hunter_custom_tickers.append(sym)
+            if not hasattr(state, 'hunter_selected_symbols'): state.hunter_selected_symbols = {}
+            state.hunter_selected_symbols[sym] = tk.BooleanVar(value=True)
+            state.save_settings_file()
+            update_hunter_symbols_ui(state, symbols_container)
+        
+        # Vždy vynútime sken len tohto symbolu
+        force_refresh_symbol_now(state, sym)
+
     ttk.Button(add_f, text="➕ Pridať", width=8, command=lambda: add_custom_ticker(state, new_sym_ent, symbols_container)).pack(side='left', padx=5)
+    ttk.Button(add_f, text="🔍 Skenovať symbol", width=16, command=scan_single_symbol).pack(side='left', padx=5)
     
     def toggle_all_symbols(state, value):
         for sym, var in state.hunter_selected_symbols.items():
@@ -1830,12 +1677,19 @@ def create_swing_hunter_tab(parent, state):
         ttk.Checkbutton(tf_opts_frame, text=tf_name, variable=var,
                         command=lambda: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)).pack(side='left', padx=2)
 
-    state.hunter_score_filter_var = tk.StringVar(value=list(SCORE_FILTER_MAP.keys())[0])
+    state.hunter_score_filter_var = tk.StringVar(value=getattr(state, 'hunter_score_filter_val', list(SCORE_FILTER_MAP.keys())[0]))
     ttk.Label(ctrl, text="Filter skóre:").pack(side='left', padx=(20, 5))
     score_combo = ttk.Combobox(ctrl, textvariable=state.hunter_score_filter_var,
                                values=list(SCORE_FILTER_MAP.keys()), width=10, state='readonly')
     score_combo.pack(side='left')
-    score_combo.bind("<<ComboboxSelected>>", lambda e: refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v))
+    score_combo.bind("<<ComboboxSelected>>", lambda e: (state.save_settings_file(), refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)))
+    
+    state.hunter_adx_filter_var = tk.StringVar(value=getattr(state, 'hunter_adx_filter_val', list(ADX_FILTER_MAP.keys())[0]))
+    ttk.Label(ctrl, text="ADX Filter:").pack(side='left', padx=(20, 5))
+    adx_combo = ttk.Combobox(ctrl, textvariable=state.hunter_adx_filter_var,
+                              values=list(ADX_FILTER_MAP.keys()), width=15, state='readonly')
+    adx_combo.pack(side='left')
+    adx_combo.bind("<<ComboboxSelected>>", lambda e: (state.save_settings_file(), refresh_hunter(state, state.hunter_tree, state.hunter_rsi_p, state.hunter_rvi_p, state.hunter_tf_v)))
     
     def clear_hunter_results():
         if messagebox.askyesno("Swing Hunter", "Naozaj chcete vymazať všetky výsledky z tabuľky?"):
@@ -2201,7 +2055,7 @@ def create_swing_hunter_tab(parent, state):
     f_ctrl_frame = ttk.Frame(footer)
     f_ctrl_frame.pack(pady=10)
     
-    ttk.Button(f_ctrl_frame, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI", 
+    ttk.Button(f_ctrl_frame, text="🏹 VYHĽADAŤ PRÍLEŽITOSTI (Všetky vybrané)", 
                command=lambda: refresh_hunter(state, tree, rsi_p, rvi_p, tf_v, force=True)).pack(side='left', padx=2)
     ttk.Button(f_ctrl_frame, text="⏹️ ZASTAVIŤ SKEN", 
                command=lambda: stop_hunter(state)).pack(side='left', padx=2)

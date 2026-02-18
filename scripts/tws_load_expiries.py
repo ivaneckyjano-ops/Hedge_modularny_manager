@@ -8,10 +8,6 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 venv_site = BASE_DIR / 'venv' / 'lib' / 'python3.12' / 'site-packages'
 if venv_site.exists():
     sys.path.insert(0, str(venv_site))
-else:
-    fallback = Path('/home/narbon/Aplikácie/tws-webapp/venv/lib/python3.12/site-packages')
-    if fallback.exists():
-        sys.path.insert(0, str(fallback))
 
 from ib_insync import IB, Option
 import random
