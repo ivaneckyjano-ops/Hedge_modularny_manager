@@ -81,13 +81,23 @@ def main():
         )
         
         ib.sleep(2)
-        
-        price = ticker.marketPrice()
-        if not price or price <= 0 or math.isnan(price):
-            if bars: price = bars[-1].close
-            else:
-                print(json.dumps({'success': False, 'error': 'Cena nedostupná'}))
-                return
+
+        # Robustné získanie ceny podkladu: preferujeme mid (bid+ask)/2 ak sú dostupné,
+        # inak last, inak posledná close z historických dát.
+        bid = getattr(ticker, 'bid', 0) or 0
+        ask = getattr(ticker, 'ask', 0) or 0
+        last = getattr(ticker, 'last', 0) or 0
+        close = bars[-1].close if bars else 0
+
+        if bid > 0 and ask > 0:
+            price = (bid + ask) / 2
+        elif last > 0:
+            price = last
+        elif close > 0:
+            price = close
+        else:
+            print(json.dumps({'success': False, 'error': 'Cena nedostupná'}))
+            return
 
         iv = getattr(ticker, 'impliedVolatility', 0)
         hv = calculate_historical_volatility(bars)
