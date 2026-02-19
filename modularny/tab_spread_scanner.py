@@ -103,11 +103,21 @@ class SpreadScannerTab:
         ttk.Button(transfer_panel, text="💰 Pridať do PMCC", command=self.add_to_pmcc).pack(side='left', padx=4)
 
         # results table
-        cols = ('median_spread','samples','price')
+        cols = ('symbol', 'median_spread','samples','price')
         self.tree = ttk.Treeview(self.frame, columns=cols, show='headings')
-        for c in cols:
-            self.tree.heading(c, text=c)
-            self.tree.column(c, anchor='center')
+        
+        self.tree.heading('symbol', text='Symbol')
+        self.tree.column('symbol', width=100, anchor='center')
+        
+        self.tree.heading('median_spread', text='Median Spread (%)')
+        self.tree.column('median_spread', width=150, anchor='center')
+        
+        self.tree.heading('samples', text='Samples')
+        self.tree.column('samples', width=100, anchor='center')
+        
+        self.tree.heading('price', text='Price')
+        self.tree.column('price', width=100, anchor='center')
+        
         self.tree.pack(fill='both', expand=True, padx=10, pady=6)
 
     def open_block_manager(self):
@@ -226,7 +236,16 @@ class SpreadScannerTab:
             for i in self.tree.get_children():
                 self.tree.delete(i)
             for r in data.get('results', []):
-                self.tree.insert('', tk.END, values=(f"{r.get('median_spread'):.4f}" if isinstance(r.get('median_spread'), float) else r.get('median_spread'), r.get('samples'), r.get('price')), text=r.get('symbol'))
+                sym = r.get('symbol', '???')
+                spread = r.get('median_spread', 0)
+                samples = r.get('samples', 0)
+                price = r.get('price', 0)
+                
+                # Format spread as percentage for humans (0.0654 -> 6.54%)
+                spread_fmt = f"{spread*100:.2f} %" if isinstance(spread, (int, float)) else str(spread)
+                price_fmt = f"{price:.2f}" if isinstance(price, (int, float)) and price > 0 else "N/A"
+                
+                self.tree.insert('', tk.END, values=(sym, spread_fmt, samples, price_fmt))
             # store into state
             self.state.top_spread_symbols = [r.get('symbol') for r in data.get('results', [])]
             if hasattr(self.state, 'save_settings_file'):

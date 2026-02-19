@@ -74,18 +74,32 @@ def scan_symbols(port, symbols, expiries_count=2, top_n=20):
                     picked = [(expirations[0], 0)] if expirations else []
                 # gather strikes
                 strikes = sorted(chain.strikes)
-                # narrow strikes around price
-                # get underlying price via snapshot
+                
+                # get underlying price (robustly)
+                price = 0.0
                 try:
-                    ticker = ib.reqMktData(stock, '106', True, False)
-                    ib.sleep(1)
-                    price = ticker.marketPrice() or 0.0
+                    # Try snapshot first
+                    tickers = ib.reqTickers(stock)
+                    if tickers:
+                        t = tickers[0]
+                        price = t.marketPrice()
+                        if not price or math.isnan(price) or price <= 0:
+                            price = t.close
                 except:
+                    pass
+
+                if not price or price <= 0 or math.isnan(price):
+                    # try historical close if market is closed
+                    try:
+                        bars = ib.reqHistoricalData(stock, endDateTime='', durationStr='5 D', barSizeSetting='1 day', whatToShow='TRADES', useRTH=True)
+                        if bars:
+                            price = bars[-1].close
+                    except:
+                        price = 0.0
+                
+                # Ensure price is not nan for JSON
+                if price is None or math.isnan(price):
                     price = 0.0
-                if not price or price <= 0:
-                    # try historical close
-                    bars = ib.reqHistoricalData(stock, endDateTime='', durationStr='10 D', barSizeSetting='1 day', whatToShow='TRADES', useRTH=True)
-                    price = bars[-1].close if bars else 0.0
 
                 low_s = price * 0.7 if price > 0 else None
                 high_s = price * 1.3 if price > 0 else None
