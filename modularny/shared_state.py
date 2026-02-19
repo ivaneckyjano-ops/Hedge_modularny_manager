@@ -647,6 +647,17 @@ class SharedState:
                 self.conn_indicator.config(fg='green')
             if self.conn_label:
                 self.conn_label.config(text=f"Pripojené k TWS (port {info.get('port', '?')})")
+            # Synchronizovať watchdog indikátor pri manuálnom checku/pripojení
+            if hasattr(self, 'tws_watchdog_var'):
+                try:
+                    self.tws_watchdog_var.set("TWS: OK")
+                except:
+                    pass
+            if hasattr(self, 'tws_watchdog_label'):
+                try:
+                    self.tws_watchdog_label.config(fg='#2e7d32')
+                except:
+                    pass
             
             # Automaticky načítaj expirácie - VYPNUTÉ pre stabilitu
             # self.load_expiries()
@@ -655,6 +666,17 @@ class SharedState:
                 self.conn_indicator.config(fg='red')
             if self.conn_label:
                 self.conn_label.config(text="Nepripojené")
+            # Synchronizovať watchdog indikátor pri strate pripojenia
+            if hasattr(self, 'tws_watchdog_var'):
+                try:
+                    self.tws_watchdog_var.set("TWS: DISCONNECTED")
+                except:
+                    pass
+            if hasattr(self, 'tws_watchdog_label'):
+                try:
+                    self.tws_watchdog_label.config(fg='#c62828')
+                except:
+                    pass
     
     def load_expiries(self):
         """Načíta dostupné expirácie z TWS"""

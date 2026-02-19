@@ -1074,6 +1074,33 @@ def refresh_hunter(state, tree, rsi_p, rvi_p, tf_var, force=False, force_symbol=
                                 d_close = day_candles[-1]['close']
                                 ma200_info = calculate_ma200_metrics(day_candles)
                                 d_ma200 = ma200_info.get('value') if ma200_info else None
+                                # Ak nemáme MA200 (málo dát), pri single-symbol alebo force-symbol skúsiť natiahnuť dlhšiu históriu
+                                if ma200_info is None and day_candles:
+                                    try:
+                                        ext_cmd = [py, scr, '--symbol', sym, '--barSize', '1 day', '--duration', '252 D', '--port', port, '--force']
+                                        print(f"DEBUG: Chýba MA200 pre {sym}, sťahujem dlhšiu históriu: {' '.join(ext_cmd)}")
+                                        ext_proc = subprocess.Popen(ext_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root)
+                                        try:
+                                            ext_stdout, ext_stderr = ext_proc.communicate(timeout=95)
+                                            if ext_proc.returncode == 0 and ext_stdout.strip():
+                                                ext_data = json.loads(ext_stdout.strip())
+                                                if ext_data.get('success'):
+                                                    ext_candles = ext_data.get('candles', [])
+                                                    if ext_candles and len(ext_candles) >= 200:
+                                                        ma200_info = calculate_ma200_metrics(ext_candles)
+                                                        d_ma200 = ma200_info.get('value') if ma200_info else None
+                                                        # replace day_candles with extended for downstream metrics if we have full series
+                                                        day_candles = ext_candles
+                                            else:
+                                                if ext_stderr:
+                                                    print(f"DEBUG STDERR (ext fetch): {ext_stderr.strip()}")
+                                        except subprocess.TimeoutExpired:
+                                            ext_proc.kill()
+                                            print(f"❌ {sym}: Timeout pri sťahovaní rozšírenej histórie pre MA200")
+                                        except Exception as e:
+                                            print(f"❌ {sym}: Chyba pri sťahovaní rozšírenej histórie: {e}")
+                                    except Exception as e:
+                                        print(f"❌ {sym}: Nepodarilo sa spustiť externý fetch pre MA200: {e}")
 
                                 if not (force or force_symbol):
                                     is_interesting = False
