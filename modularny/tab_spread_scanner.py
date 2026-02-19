@@ -37,6 +37,20 @@ class SpreadScannerTab:
         ttk.Radiobutton(left, text="Hunter custom", variable=self.src_var, value='hunter').pack(anchor='w')
 
         ttk.Button(left, text="📁 Spravovať bloky", command=self.open_block_manager).pack(fill='x', pady=(6,0))
+        # Combobox to choose which spread block to use
+        ttk.Label(left, text="Vybrať blok:", font=('Arial', 8)).pack(anchor='w', pady=(6,0))
+        # initialize selected block var if missing
+        if not hasattr(self.state, 'spread_selected_block'):
+            try:
+                self.state.spread_selected_block = tk.StringVar(value="-- Vybrať blok --")
+            except Exception:
+                self.state.spread_selected_block = None
+        init_val = self.state.spread_selected_block.get() if getattr(self.state, 'spread_selected_block', None) else "-- Vybrať blok --"
+        block_names = sorted(list(getattr(self.state, 'spread_symbol_blocks', {}).keys()))
+        self.block_combo_var = tk.StringVar(value=init_val)
+        self.block_combo = ttk.Combobox(left, textvariable=self.block_combo_var, values=block_names, state='readonly', width=20)
+        self.block_combo.pack(fill='x', pady=(2,0))
+        self.block_combo.bind("<<ComboboxSelected>>", self._on_block_selected)
 
         center = ttk.LabelFrame(top_panel, text="Nastavenia", padding=8)
         center.pack(side='left', fill='x', expand=True)
@@ -83,9 +97,39 @@ class SpreadScannerTab:
         from modularny.shared_state import open_symbol_block_manager
         open_symbol_block_manager(self.state, self.update_block_combo, 'spread_symbol_blocks')
 
+    def _on_block_selected(self, event=None):
+        val = self.block_combo_var.get()
+        if hasattr(self.state, 'spread_selected_block') and getattr(self.state, 'spread_selected_block') is not None:
+            try:
+                self.state.spread_selected_block.set(val)
+            except Exception:
+                self.state.spread_selected_block = tk.StringVar(value=val)
+        else:
+            try:
+                self.state.spread_selected_block = tk.StringVar(value=val)
+            except Exception:
+                self.state.spread_selected_block = None
+
     def update_block_combo(self):
-        # no combobox in this layout, but can be used later
-        pass
+        # Refresh combobox values from state.spread_symbol_blocks
+        blocks = getattr(self.state, 'spread_symbol_blocks', {}) or {}
+        names = sorted(blocks.keys())
+        try:
+            self.block_combo['values'] = names
+            sel = getattr(self.state, 'spread_selected_block', None)
+            if sel and hasattr(sel, 'get'):
+                cur = sel.get()
+                if cur in names:
+                    self.block_combo_var.set(cur)
+                elif names:
+                    # pick first as default
+                    self.block_combo_var.set(names[0])
+                    try:
+                        self.state.spread_selected_block.set(names[0])
+                    except Exception:
+                        self.state.spread_selected_block = tk.StringVar(value=names[0])
+        except Exception:
+            pass
 
     def on_generate(self):
         src = self.src_var.get()
