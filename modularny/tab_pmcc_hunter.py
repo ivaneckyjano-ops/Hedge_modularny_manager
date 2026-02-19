@@ -147,6 +147,7 @@ class PMCCHunterTab:
         ttk.Button(btn_panel, text="📊 CSV Export", command=self.export_to_csv).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="📂 CSV Import", command=self.import_from_csv).pack(side='right', padx=2)
         ttk.Button(btn_panel, text="🔄 Sync zo Swing Huntera", command=self.sync_from_hunter).pack(side='right', padx=2)
+        ttk.Button(btn_panel, text="🔎 Top‑100 Spread", command=self.open_top_spread_dialog).pack(side='right', padx=2)
 
         # --- Tabuľka výsledkov ---
         t_frame = ttk.Frame(self.frame)
@@ -752,6 +753,155 @@ class PMCCHunterTab:
                 messagebox.showinfo("Import", f"Úspešne importovaných {count} symbolov z CSV.")
         except Exception as e:
             messagebox.showerror("Chyba", f"Nepodarilo sa importovať CSV: {e}")
+
+    def open_top_spread_dialog(self):
+        """Otvori dialóg pre generovanie top-N zoznamu podľa spreadu"""
+        win = tk.Toplevel(self.parent)
+        win.title("🔎 Vytvoriť Top‑Spread Watchlist")
+        win.geometry("520x260")
+        win.transient(self.parent)
+        win.grab_set()
+
+        frame = ttk.Frame(win, padding=10)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text="Zdroj symbolov:", font=('Arial', 10, 'bold')).pack(anchor='w')
+        src_var = tk.StringVar(value="manual")
+        rb_frame = ttk.Frame(frame)
+        rb_frame.pack(fill='x', pady=(2,8))
+        ttk.Radiobutton(rb_frame, text="Manuálne (textové pole)", variable=src_var, value="manual").pack(side='left', padx=6)
+        ttk.Radiobutton(rb_frame, text="PMCC list", variable=src_var, value="pmcc").pack(side='left', padx=6)
+        ttk.Radiobutton(rb_frame, text="Hunter custom", variable=src_var, value="hunter").pack(side='left', padx=6)
+        ttk.Radiobutton(rb_frame, text="Symbol block", variable=src_var, value="block").pack(side='left', padx=6)
+
+        ttk.Label(frame, text="Ak manuálne: použije sa obsah poľa 'Zoznam symbolov' vľavo.", font=('Arial', 9)).pack(anchor='w', pady=(0,6))
+
+        params_f = ttk.Frame(frame)
+        params_f.pack(fill='x', pady=4)
+        ttk.Label(params_f, text="Candidate limit:").grid(row=0, column=0, sticky='w')
+        cand_var = tk.StringVar(value="1000")
+        ttk.Entry(params_f, textvariable=cand_var, width=8).grid(row=0, column=1, padx=6)
+        ttk.Label(params_f, text="Batch size:").grid(row=0, column=2, sticky='w')
+        batch_var = tk.StringVar(value="25")
+        ttk.Entry(params_f, textvariable=batch_var, width=6).grid(row=0, column=3, padx=6)
+        ttk.Label(params_f, text="Top N:").grid(row=1, column=0, sticky='w', pady=(6,0))
+        topn_var = tk.StringVar(value="100")
+        ttk.Entry(params_f, textvariable=topn_var, width=8).grid(row=1, column=1, padx=6, pady=(6,0))
+        ttk.Label(params_f, text="Expiries:").grid(row=1, column=2, sticky='w', pady=(6,0))
+        exp_var = tk.StringVar(value="2")
+        ttk.Entry(params_f, textvariable=exp_var, width=6).grid(row=1, column=3, padx=6, pady=(6,0))
+
+        btn_f = ttk.Frame(frame)
+        btn_f.pack(fill='x', pady=10)
+
+        def on_start():
+            src = src_var.get()
+            # determine symbol source
+            if src == 'manual':
+                txt = self.sym_text.get('1.0', tk.END).strip()
+                symbols = [s.strip().upper() for s in txt.replace(',', ' ').split() if s.strip()]
+            elif src == 'pmcc':
+                symbols = getattr(self.state, 'pmcc_symbols', []) or []
+            elif src == 'hunter':
+                symbols = getattr(self.state, 'hunter_custom_tickers', []) or []
+            elif src == 'block':
+                blk = self.block_var.get()
+                symbols = self.state.symbol_blocks.get(blk, []) if blk and blk in self.state.symbol_blocks else []
+            else:
+                symbols = []
+
+            if not symbols:
+                messagebox.showwarning("Top‑Spread", "Zdroj symbolov je prázdny.")
+                return
+
+            # write temp file
+            tmpf = os.path.join(self.cache_dir, f"candidates_{int(time.time())}.txt")
+            with open(tmpf, 'w', encoding='utf-8') as f:
+                f.write("\n".join(symbols))
+
+            win.destroy()
+            self.status_var.set("🔎 Generujem top‑spread list...")
+            self.status_lbl.config(foreground="orange")
+
+            threading.Thread(target=self._run_generate_top_spread, args=(tmpf, cand_var.get(), batch_var.get(), exp_var.get(), topn_var.get()), daemon=True).start()
+
+        ttk.Button(btn_f, text="Spustiť generovanie", command=on_start).pack(side='left', padx=6)
+        ttk.Button(btn_f, text="Zrušiť", command=win.destroy).pack(side='right', padx=6)
+
+    def _run_generate_top_spread(self, symbol_file, candidate_limit, batch_size, expiries, top_n):
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(root_dir, 'scripts', 'generate_top_spread_list.py')
+        port = getattr(self.state, 'current_port', getattr(self.state, 'port_var', '7497'))
+        cmd = [sys.executable, script, str(port), '--symbol-file', symbol_file, '--candidate-limit', str(candidate_limit), '--batch-size', str(batch_size), '--expiries', str(expiries), '--top', str(top_n)]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root_dir)
+            stdout, stderr = proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(stderr or stdout)
+            # load cache and show results
+            cache_file = os.path.join(root_dir, 'cache', 'top_spread_symbols.json')
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self.state.root.after(0, lambda: self._show_top_spread_window(data))
+                self.state.root.after(0, lambda: self.status_var.set("✅ Hotovo (Top‑spread načítané)"))
+                self.state.root.after(0, lambda: self.status_lbl.config(foreground="green"))
+            else:
+                raise RuntimeError("Cache file not found after generation.")
+        except Exception as e:
+            self.state.root.after(0, lambda: messagebox.showerror("Chyba", f"Generovanie top‑spread zlyhalo:\n{e}"))
+            self.state.root.after(0, lambda: self.status_var.set("❌ Chyba generovania"))
+            self.state.root.after(0, lambda: self.status_lbl.config(foreground="red"))
+
+    def _show_top_spread_window(self, data):
+        win = tk.Toplevel(self.parent)
+        win.title("Top‑Spread Watchlist")
+        win.geometry("520x480")
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill='both', expand=True)
+
+        cols = ('median_spread', 'samples', 'price')
+        tree = ttk.Treeview(frame, columns=cols, show='headings')
+        tree.heading('median_spread', text='Median Spread')
+        tree.heading('samples', text='Samples')
+        tree.heading('price', text='Price')
+        tree.column('median_spread', width=120, anchor='center')
+        tree.column('samples', width=80, anchor='center')
+        tree.column('price', width=100, anchor='center')
+        tree.pack(fill='both', expand=True)
+
+        for r in data.get('results', []):
+            tree.insert('', tk.END, values=(f"{r.get('median_spread'):.4f}" if isinstance(r.get('median_spread'), float) else r.get('median_spread'), r.get('samples'), r.get('price')), text=r.get('symbol'))
+
+        def export_csv():
+            from tkinter import filedialog
+            import csv
+            p = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files","*.csv")])
+            if not p: return
+            try:
+                with open(p, 'w', newline='', encoding='utf-8') as f:
+                    w = csv.writer(f)
+                    w.writerow(['Symbol','MedianSpread','Samples','Price'])
+                    for r in data.get('results', []):
+                        w.writerow([r.get('symbol'), r.get('median_spread'), r.get('samples'), r.get('price')])
+                messagebox.showinfo("Export", f"Uložené do {p}")
+            except Exception as e:
+                messagebox.showerror("Chyba", str(e))
+
+        def save_to_pmcc():
+            syms = [r.get('symbol') for r in data.get('results', [])]
+            self.state.pmcc_symbols = syms
+            try:
+                if hasattr(self.state, 'save_settings_file'):
+                    self.state.save_settings_file()
+                messagebox.showinfo("Uložené", f"Top {len(syms)} uložených do PMCC listu.")
+            except Exception as e:
+                messagebox.showerror("Chyba", str(e))
+
+        btnf = ttk.Frame(frame)
+        btnf.pack(fill='x', pady=6)
+        ttk.Button(btnf, text="📤 Export CSV", command=export_csv).pack(side='left', padx=6)
+        ttk.Button(btnf, text="💾 Uložiť do PMCC listu", command=save_to_pmcc).pack(side='left', padx=6)
 
     def stop_scan(self):
         self.scan_session_id += 1
