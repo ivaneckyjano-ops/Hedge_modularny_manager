@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+Spread Scanner tab - UI for generating and viewing top‑N symbols with smallest option spreads.
+Uses scripts/generate_top_spread_list.py to compute the list and stores results in cache/top_spread_symbols.json.
+"""
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+import subprocess
+import json
+import os
+import sys
+import time
+
+class SpreadScannerTab:
+    def __init__(self, parent, state):
+        self.parent = parent
+        self.state = state
+        self.frame = ttk.Frame(parent)
+        self.frame.pack(fill='both', expand=True)
+        self.cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cache')
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.setup_ui()
+        self.load_cached_top_list()
+
+    def setup_ui(self):
+        top_panel = ttk.Frame(self.frame)
+        top_panel.pack(fill='x', padx=10, pady=6)
+
+        left = ttk.LabelFrame(top_panel, text="Zdroj symbolov", padding=8)
+        left.pack(side='left', fill='y', padx=(0,8))
+
+        self.src_var = tk.StringVar(value='block')
+        ttk.Radiobutton(left, text="Symbol block", variable=self.src_var, value='block').pack(anchor='w')
+        ttk.Radiobutton(left, text="Manuálne", variable=self.src_var, value='manual').pack(anchor='w')
+        ttk.Radiobutton(left, text="PMCC list", variable=self.src_var, value='pmcc').pack(anchor='w')
+        ttk.Radiobutton(left, text="Hunter custom", variable=self.src_var, value='hunter').pack(anchor='w')
+
+        ttk.Button(left, text="📁 Spravovať bloky", command=self.open_block_manager).pack(fill='x', pady=(6,0))
+
+        center = ttk.LabelFrame(top_panel, text="Nastavenia", padding=8)
+        center.pack(side='left', fill='x', expand=True)
+        ttk.Label(center, text="Candidate limit:").grid(row=0, column=0, sticky='w')
+        self.candidate_limit = tk.StringVar(value="1000")
+        ttk.Entry(center, textvariable=self.candidate_limit, width=8).grid(row=0, column=1, padx=6)
+        ttk.Label(center, text="Batch size:").grid(row=0, column=2, sticky='w')
+        self.batch_size = tk.StringVar(value="25")
+        ttk.Entry(center, textvariable=self.batch_size, width=6).grid(row=0, column=3, padx=6)
+        ttk.Label(center, text="Top N:").grid(row=1, column=0, sticky='w', pady=(6,0))
+        self.top_n = tk.StringVar(value="100")
+        ttk.Entry(center, textvariable=self.top_n, width=8).grid(row=1, column=1, padx=6, pady=(6,0))
+        ttk.Label(center, text="Expiries:").grid(row=1, column=2, sticky='w', pady=(6,0))
+        self.expiries = tk.StringVar(value="2")
+        ttk.Entry(center, textvariable=self.expiries, width=6).grid(row=1, column=3, padx=6, pady=(6,0))
+
+        right = ttk.LabelFrame(top_panel, text="Manuálny vstup", padding=8)
+        right.pack(side='right', fill='y')
+        self.sym_text = tk.Text(right, width=28, height=4, font=('Arial', 9))
+        self.sym_text.pack()
+        initial = ", ".join(getattr(self.state, 'top_spread_symbols', []))
+        self.sym_text.insert('1.0', initial)
+
+        btn_panel = ttk.Frame(self.frame)
+        btn_panel.pack(fill='x', padx=10, pady=6)
+        self.status_var = tk.StringVar(value="Pripravený")
+        self.status_lbl = ttk.Label(btn_panel, textvariable=self.status_var, foreground="gray")
+        self.status_lbl.pack(side='left', padx=5)
+
+        ttk.Button(btn_panel, text="🔄 Generovať top‑list", command=self.on_generate).pack(side='right', padx=4)
+        ttk.Button(btn_panel, text="📥 Načítať cache", command=self.load_cached_top_list).pack(side='right', padx=4)
+        ttk.Button(btn_panel, text="📤 Export CSV", command=self.export_csv).pack(side='right', padx=4)
+        ttk.Button(btn_panel, text="💾 Uložiť do Spread listu", command=self.save_to_spread_list).pack(side='right', padx=4)
+
+        # results table
+        cols = ('median_spread','samples','price')
+        self.tree = ttk.Treeview(self.frame, columns=cols, show='headings')
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, anchor='center')
+        self.tree.pack(fill='both', expand=True, padx=10, pady=6)
+
+    def open_block_manager(self):
+        from modularny.shared_state import open_symbol_block_manager
+        open_symbol_block_manager(self.state, self.update_block_combo, 'spread_symbol_blocks')
+
+    def update_block_combo(self):
+        # no combobox in this layout, but can be used later
+        pass
+
+    def on_generate(self):
+        src = self.src_var.get()
+        if src == 'manual':
+            txt = self.sym_text.get('1.0', tk.END).strip()
+            symbols = [s.strip().upper() for s in txt.replace(',', ' ').split() if s.strip()]
+        elif src == 'pmcc':
+            symbols = getattr(self.state, 'pmcc_symbols', []) or []
+        elif src == 'hunter':
+            symbols = getattr(self.state, 'hunter_custom_tickers', []) or []
+        else:
+            blk = self.state.spread_selected_block.get() if hasattr(self.state, 'spread_selected_block') else None
+            symbols = self.state.spread_symbol_blocks.get(blk, []) if blk and blk in getattr(self.state, 'spread_symbol_blocks', {}) else []
+
+        if not symbols:
+            messagebox.showwarning("Spread Scanner", "Žiadne symboly pre skenovanie.")
+            return
+
+        # write temp file
+        tmpf = os.path.join(self.cache_dir, f"candidates_{int(time.time())}.txt")
+        with open(tmpf, 'w', encoding='utf-8') as f:
+            f.write("\n".join(symbols))
+
+        self.status_var.set("🔎 Generovanie...")
+        self.status_lbl.config(foreground="orange")
+        threading.Thread(target=self._run_generate, args=(tmpf,), daemon=True).start()
+
+    def _run_generate(self, symbol_file):
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(root_dir, 'scripts', 'generate_top_spread_list.py')
+        port = getattr(self.state, 'current_port', getattr(self.state, 'port_var', '7497'))
+        cmd = [sys.executable, script, str(port), '--symbol-file', symbol_file, '--candidate-limit', self.candidate_limit.get(), '--batch-size', self.batch_size.get(), '--expiries', self.expiries.get(), '--top', self.top_n.get()]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root_dir)
+            stdout, stderr = proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(stderr or stdout)
+            self.load_cached_top_list()
+            self.state.root.after(0, lambda: self.status_var.set("✅ Hotovo"))
+            self.state.root.after(0, lambda: self.status_lbl.config(foreground="green"))
+        except Exception as e:
+            self.state.root.after(0, lambda: messagebox.showerror("Chyba", f"Generovanie zlyhalo:\n{e}"))
+            self.state.root.after(0, lambda: self.status_var.set("❌ Chyba"))
+            self.state.root.after(0, lambda: self.status_lbl.config(foreground="red"))
+
+    def load_cached_top_list(self):
+        cache_file = os.path.join(self.cache_dir, 'top_spread_symbols.json')
+        if not os.path.exists(cache_file):
+            messagebox.showinfo("Info", "Žiadny cache súbor (top_spread_symbols.json). Generujte najprv zoznam.")
+            return
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # populate tree
+            for i in self.tree.get_children():
+                self.tree.delete(i)
+            for r in data.get('results', []):
+                self.tree.insert('', tk.END, values=(f"{r.get('median_spread'):.4f}" if isinstance(r.get('median_spread'), float) else r.get('median_spread'), r.get('samples'), r.get('price')), text=r.get('symbol'))
+            # store into state
+            self.state.top_spread_symbols = [r.get('symbol') for r in data.get('results', [])]
+            if hasattr(self.state, 'save_settings_file'):
+                self.state.save_settings_file()
+            self.status_var.set("✅ Načítané")
+            self.status_lbl.config(foreground="green")
+        except Exception as e:
+            messagebox.showerror("Chyba", f"Chyba pri načítaní cache: {e}")
+
+    def export_csv(self):
+        from tkinter import filedialog
+        import csv
+        p = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files","*.csv")])
+        if not p: return
+        try:
+            with open(p, 'w', newline='', encoding='utf-8') as f:
+                w = csv.writer(f)
+                w.writerow(['Symbol','MedianSpread','Samples','Price'])
+                for iid in self.tree.get_children():
+                    vals = self.tree.item(iid, 'values')
+                    sym = self.tree.item(iid, 'text')
+                    w.writerow([sym, vals[0], vals[1], vals[2]])
+            messagebox.showinfo("Export", f"Uložené do {p}")
+        except Exception as e:
+            messagebox.showerror("Chyba", str(e))
+
+    def save_to_spread_list(self):
+        syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children()]
+        self.state.top_spread_symbols = syms
+        if hasattr(self.state, 'save_settings_file'):
+            self.state.save_settings_file()
+        messagebox.showinfo("Uložené", f"Top {len(syms)} uložených do Spread listu.")
+
+def create_spread_scanner_tab(parent, state):
+    return SpreadScannerTab(parent, state)
+

@@ -323,6 +323,11 @@ class HedgeManagerGUI:
             tab_pmcc = ttk.Frame(notebook)
             notebook.add(tab_pmcc, text="💰 PMCC Hunter")
             safe_create_tab(tab_pmcc, "PMCC Hunter", "modularny.tab_pmcc_hunter", "create_pmcc_hunter_tab")
+            
+            # 7.1 Spread Scanner
+            tab_spread = ttk.Frame(notebook)
+            notebook.add(tab_spread, text="🔬 Spread Scanner")
+            safe_create_tab(tab_spread, "Spread Scanner", "modularny.tab_spread_scanner", "create_spread_scanner_tab")
 
             # 8. Manažér pozícií (NOVÉ)
             tab_tm = ttk.Frame(notebook)
