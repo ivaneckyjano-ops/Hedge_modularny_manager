@@ -67,12 +67,17 @@ class SpreadScannerTab:
         self.expiries = tk.StringVar(value="2")
         ttk.Entry(center, textvariable=self.expiries, width=6).grid(row=1, column=3, padx=6, pady=(6,0))
 
-        right = ttk.LabelFrame(top_panel, text="Manuálny vstup", padding=8)
+        right = ttk.LabelFrame(top_panel, text="Manuálny vstup / Spread list", padding=8)
         right.pack(side='right', fill='y')
-        self.sym_text = tk.Text(right, width=28, height=4, font=('Arial', 9))
+        self.sym_text = tk.Text(right, width=32, height=4, font=('Arial', 9))
         self.sym_text.pack()
         initial = ", ".join(getattr(self.state, 'top_spread_symbols', []))
         self.sym_text.insert('1.0', initial)
+        
+        btn_grid = ttk.Frame(right)
+        btn_grid.pack(fill='x', pady=(4,0))
+        ttk.Button(btn_grid, text="🗑 Vymazať plochu", command=self.clear_manual_input).pack(side='left', fill='x', expand=True, padx=(0,2))
+        ttk.Button(btn_grid, text="👁 Načítať Spread list", command=self.view_spread_list).pack(side='left', fill='x', expand=True, padx=(2,0))
 
         btn_panel = ttk.Frame(self.frame)
         btn_panel.pack(fill='x', padx=10, pady=6)
@@ -80,10 +85,15 @@ class SpreadScannerTab:
         self.status_lbl = ttk.Label(btn_panel, textvariable=self.status_var, foreground="gray")
         self.status_lbl.pack(side='left', padx=5)
 
-        ttk.Button(btn_panel, text="🔄 Generovať top‑list", command=self.on_generate).pack(side='right', padx=4)
+        self.gen_btn = ttk.Button(btn_panel, text="🔄 Generovať top‑list", command=self.on_generate)
+        self.gen_btn.pack(side='right', padx=4)
+        self.stop_btn = ttk.Button(btn_panel, text="⏹ Zastaviť", command=self.on_stop, state='disabled')
+        self.stop_btn.pack(side='right', padx=4)
+        
         ttk.Button(btn_panel, text="📥 Načítať cache", command=self.load_cached_top_list).pack(side='right', padx=4)
         ttk.Button(btn_panel, text="📤 Export CSV", command=self.export_csv).pack(side='right', padx=4)
         ttk.Button(btn_panel, text="💾 Uložiť do Spread listu", command=self.save_to_spread_list).pack(side='right', padx=4)
+        ttk.Button(btn_panel, text="🧨 Vymazať Spread list", command=self.clear_spread_list).pack(side='right', padx=4)
 
         # New transfer buttons
         transfer_panel = ttk.Frame(self.frame)
@@ -162,7 +172,18 @@ class SpreadScannerTab:
 
         self.status_var.set("🔎 Generovanie...")
         self.status_lbl.config(foreground="orange")
+        self.gen_btn['state'] = 'disabled'
+        self.stop_btn['state'] = 'normal'
         threading.Thread(target=self._run_generate, args=(tmpf,), daemon=True).start()
+
+    def on_stop(self):
+        if hasattr(self, 'proc') and self.proc:
+            try:
+                self.proc.terminate()
+                self.status_var.set("⏹ Zastavené")
+                self.status_lbl.config(foreground="gray")
+            except Exception as e:
+                print(f"Chyba pri zastavovaní: {e}")
 
     def _run_generate(self, symbol_file):
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,17 +191,28 @@ class SpreadScannerTab:
         port = getattr(self.state, 'current_port', getattr(self.state, 'port_var', '7497'))
         cmd = [sys.executable, script, str(port), '--symbol-file', symbol_file, '--candidate-limit', self.candidate_limit.get(), '--batch-size', self.batch_size.get(), '--expiries', self.expiries.get(), '--top', self.top_n.get()]
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root_dir)
-            stdout, stderr = proc.communicate()
-            if proc.returncode != 0:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=root_dir)
+            stdout, stderr = self.proc.communicate()
+            
+            self.state.root.after(0, lambda: self.gen_btn.config(state='normal'))
+            self.state.root.after(0, lambda: self.stop_btn.config(state='disabled'))
+
+            if self.proc.returncode != 0:
+                # If it was terminated by user, don't show error box
+                if self.status_var.get() == "⏹ Zastavené":
+                    return
                 raise RuntimeError(stderr or stdout)
-            self.load_cached_top_list()
+            
+            self.state.root.after(0, self.load_cached_top_list)
             self.state.root.after(0, lambda: self.status_var.set("✅ Hotovo"))
             self.state.root.after(0, lambda: self.status_lbl.config(foreground="green"))
         except Exception as e:
-            self.state.root.after(0, lambda: messagebox.showerror("Chyba", f"Generovanie zlyhalo:\n{e}"))
-            self.state.root.after(0, lambda: self.status_var.set("❌ Chyba"))
-            self.state.root.after(0, lambda: self.status_lbl.config(foreground="red"))
+            self.state.root.after(0, lambda: self.gen_btn.config(state='normal'))
+            self.state.root.after(0, lambda: self.stop_btn.config(state='disabled'))
+            if self.status_var.get() != "⏹ Zastavené":
+                self.state.root.after(0, lambda: messagebox.showerror("Chyba", f"Generovanie zlyhalo:\n{e}"))
+                self.state.root.after(0, lambda: self.status_var.set("❌ Chyba"))
+                self.state.root.after(0, lambda: self.status_lbl.config(foreground="red"))
 
     def load_cached_top_list(self):
         cache_file = os.path.join(self.cache_dir, 'top_spread_symbols.json')
@@ -223,10 +255,28 @@ class SpreadScannerTab:
 
     def save_to_spread_list(self):
         syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children()]
+        if not syms:
+            messagebox.showwarning("Uložiť", "Zoznam výsledkov je prázdny.")
+            return
         self.state.top_spread_symbols = syms
         if hasattr(self.state, 'save_settings_file'):
             self.state.save_settings_file()
-        messagebox.showinfo("Uložené", f"Top {len(syms)} uložených do Spread listu.")
+        messagebox.showinfo("Uložené", f"Top {len(syms)} uložených do interného Spread listu.")
+
+    def clear_spread_list(self):
+        if messagebox.askyesno("Vymazať", "Naozaj chcete vymazať uložený interný Spread list?"):
+            self.state.top_spread_symbols = []
+            if hasattr(self.state, 'save_settings_file'):
+                self.state.save_settings_file()
+            messagebox.showinfo("Hotovo", "Spread list bol vymazaný.")
+
+    def view_spread_list(self):
+        syms = getattr(self.state, 'top_spread_symbols', []) or []
+        self.sym_text.delete('1.0', tk.END)
+        self.sym_text.insert('1.0', ", ".join(syms))
+
+    def clear_manual_input(self):
+        self.sym_text.delete('1.0', tk.END)
 
     def add_to_hunter(self):
         syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children() if self.tree.item(iid, 'text')]
