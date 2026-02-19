@@ -85,6 +85,13 @@ class SpreadScannerTab:
         ttk.Button(btn_panel, text="📤 Export CSV", command=self.export_csv).pack(side='right', padx=4)
         ttk.Button(btn_panel, text="💾 Uložiť do Spread listu", command=self.save_to_spread_list).pack(side='right', padx=4)
 
+        # New transfer buttons
+        transfer_panel = ttk.Frame(self.frame)
+        transfer_panel.pack(fill='x', padx=10, pady=(0, 6))
+        ttk.Label(transfer_panel, text="Preniesť výsledky:", font=('Arial', 9, 'bold')).pack(side='left', padx=(5, 10))
+        ttk.Button(transfer_panel, text="🎯 Pridať do Huntera", command=self.add_to_hunter).pack(side='left', padx=4)
+        ttk.Button(transfer_panel, text="💰 Pridať do PMCC", command=self.add_to_pmcc).pack(side='left', padx=4)
+
         # results table
         cols = ('median_spread','samples','price')
         self.tree = ttk.Treeview(self.frame, columns=cols, show='headings')
@@ -220,6 +227,52 @@ class SpreadScannerTab:
         if hasattr(self.state, 'save_settings_file'):
             self.state.save_settings_file()
         messagebox.showinfo("Uložené", f"Top {len(syms)} uložených do Spread listu.")
+
+    def add_to_hunter(self):
+        syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children() if self.tree.item(iid, 'text')]
+        if not syms:
+            messagebox.showwarning("Pridať", "Zoznam výsledkov je prázdny. Najprv vygenerujte zoznam.")
+            return
+        
+        current = list(getattr(self.state, 'hunter_custom_tickers', []) or [])
+        initial_count = len(current)
+        
+        added = []
+        for s in syms:
+            if s not in current:
+                current.append(s)
+                added.append(s)
+        
+        if added:
+            self.state.hunter_custom_tickers = current
+            if hasattr(self.state, 'save_settings_file'):
+                self.state.save_settings_file()
+            messagebox.showinfo("Hotovo", f"Pridaných {len(added)} symbolov do Swing Huntera:\n{', '.join(added[:15])}{'...' if len(added)>15 else ''}")
+        else:
+            messagebox.showinfo("Info", "Všetky symboly už v Hunteri sú.")
+
+    def add_to_pmcc(self):
+        syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children() if self.tree.item(iid, 'text')]
+        if not syms:
+            messagebox.showwarning("Pridať", "Zoznam výsledkov je prázdny. Najprv vygenerujte zoznam.")
+            return
+        
+        current = list(getattr(self.state, 'pmcc_symbols', []) or [])
+        initial_count = len(current)
+        
+        added = []
+        for s in syms:
+            if s not in current:
+                current.append(s)
+                added.append(s)
+        
+        if added:
+            self.state.pmcc_symbols = current
+            if hasattr(self.state, 'save_settings_file'):
+                self.state.save_settings_file()
+            messagebox.showinfo("Hotovo", f"Pridaných {len(added)} symbolov do PMCC Huntera:\n{', '.join(added[:15])}{'...' if len(added)>15 else ''}")
+        else:
+            messagebox.showinfo("Info", "Všetky symboly už v PMCC Hunteri sú.")
 
 def create_spread_scanner_tab(parent, state):
     return SpreadScannerTab(parent, state)
