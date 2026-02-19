@@ -273,7 +273,7 @@ class SpreadScannerTab:
             messagebox.showerror("Chyba", str(e))
 
     def save_to_spread_list(self):
-        syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children()]
+        syms = [self.tree.item(iid, 'values')[0] for iid in self.tree.get_children() if self.tree.item(iid, 'values')]
         if not syms:
             messagebox.showwarning("Uložiť", "Zoznam výsledkov je prázdny.")
             return
@@ -298,7 +298,7 @@ class SpreadScannerTab:
         self.sym_text.delete('1.0', tk.END)
 
     def add_to_hunter(self):
-        syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children() if self.tree.item(iid, 'text')]
+        syms = [self.tree.item(iid, 'values')[0] for iid in self.tree.get_children() if self.tree.item(iid, 'values')]
         if not syms:
             messagebox.showwarning("Pridať", "Zoznam výsledkov je prázdny. Najprv vygenerujte zoznam.")
             return
@@ -321,7 +321,7 @@ class SpreadScannerTab:
             messagebox.showinfo("Info", "Všetky symboly už v Hunteri sú.")
 
     def add_to_pmcc(self):
-        syms = [self.tree.item(iid, 'text') for iid in self.tree.get_children() if self.tree.item(iid, 'text')]
+        syms = [self.tree.item(iid, 'values')[0] for iid in self.tree.get_children() if self.tree.item(iid, 'values')]
         if not syms:
             messagebox.showwarning("Pridať", "Zoznam výsledkov je prázdny. Najprv vygenerujte zoznam.")
             return
